@@ -1,0 +1,39 @@
+# Android/Gradle
+*.iml
+.gradle/
+local.properties
+/.idea/
+/build/
+/captures/
+.externalNativeBuild/
+/.cxx/
+app/build/
+
+# Keystores (never commit secrets)
+*.jks
+*.keystore
+*.keystore.properties
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor/tooling
+.vscode/
+# Cursor tooling
+.cursor/
+.cursorrules
+
+# Python caches (Chaquopy)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs & dumps
+*.log
+*.hprof
+
+# Generated artifacts
+*.apk
+*.aab
+*.ap_
