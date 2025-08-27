@@ -1,187 +1,150 @@
 package com.example.odmas.core.agents
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
+import android.util.Log
+import com.example.odmas.utils.LogFileLogger
 import org.tensorflow.lite.Interpreter
-import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.io.FileInputStream
 import java.nio.MappedByteBuffer
-import kotlin.math.pow
+import java.nio.channels.FileChannel
 import kotlin.math.sqrt
 
 /**
- * Tier-1 Autoencoder Agent: Deep learning-based anomaly detection
- * 
- * Features:
- * - Tiny int8 autoencoder model via TensorFlow Lite
- * - Reconstruction error computation
- * - Baseline statistics maintenance (μₑ, σₑ)
- * - Z-score normalization for anomaly detection
+ * Tier-1 Autoencoder Agent (TFLite):
+ * - Loads a tiny autoencoder model from assets/autoencoder_model.tflite
+ * - Computes reconstruction error (MSE) as the anomaly "error"
+ * - Learns baseline mean/std of error online (≥100 samples) for probability conversion in Fusion
+ *
+ * Notes:
+ * - Keeps the same public API so Fusion and SecurityManager continue to work unchanged.
+ * - If model cannot be loaded, falls back to a safe pass-through (copy input to output) to avoid crashes.
  */
 class Tier1AutoencoderAgent(private val context: Context) {
-    
+
     private var interpreter: Interpreter? = null
-    private var isModelLoaded = false
-    
-    // Baseline statistics for reconstruction error
+
+    // Baseline statistics for reconstruction error (learned online)
     private var baselineMean: Double = 0.0
     private var baselineStd: Double = 1.0
-    private var isBaselineEstablished = false
-    
-    // Error history for baseline computation
+    private var isBaselineEstablished: Boolean = false
+
     private val errorHistory = mutableListOf<Double>()
     private val maxErrorHistorySize = 1000
-    
+
     companion object {
+        private const val TAG = "Tier1Autoencoder"
         private const val MODEL_FILENAME = "autoencoder_model.tflite"
-        private const val INPUT_SIZE = 10 // Same as Tier-0 feature count
-        private const val LATENT_SIZE = 3 // Compressed representation
+        private const val INPUT_SIZE = 10 // feature count
         private const val MIN_BASELINE_SAMPLES = 100
-        private const val MODEL_INPUT_SIZE = INPUT_SIZE * 4 // 4 bytes per float
-        private const val MODEL_OUTPUT_SIZE = INPUT_SIZE * 4
     }
-    
+
     /**
-     * Initialize the autoencoder model
+     * Initialize the autoencoder interpreter from assets.
      */
     fun initializeModel(): Boolean {
         return try {
-            // For now, skip TensorFlow Lite model creation and use a simple fallback
-            // This allows the app to work without the complex model setup
-            isModelLoaded = true
+            val model = loadModelFile(context, MODEL_FILENAME)
+            val options = Interpreter.Options().apply {
+                setNumThreads(2)
+            }
+            interpreter = Interpreter(model, options)
+            LogFileLogger.log(TAG, "TFLite autoencoder initialized")
             true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            // Return true anyway so the app can still function
-            isModelLoaded = true
-            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "initializeModel failed: ${t.message}", t)
+            LogFileLogger.log(TAG, "initializeModel failed: ${t.message}", t)
+            // Keep interpreter null; computeReconstructionError will fallback to pass-through
+            false
         }
     }
-    
+
     /**
-     * Process features and compute reconstruction error
-     * @param features Input feature vector
-     * @return Reconstruction error, or null if model not ready
+     * Compute reconstruction error for a 10-dim feature vector.
+     * If interpreter is unavailable, returns a small safe value while still updating the baseline buffer.
      */
     fun computeReconstructionError(features: DoubleArray): Double? {
-        if (!isModelLoaded || features.size != INPUT_SIZE) {
-            return null
+        if (features.size != INPUT_SIZE) return null
+
+        val output = FloatArray(INPUT_SIZE)
+        val error: Double = try {
+            val tflite = interpreter
+            if (tflite != null) {
+                // Model expects shape [1, 10] -> [1, 10]
+                val input = arrayOf(FloatArray(INPUT_SIZE) { i -> features[i].toFloat() })
+                val out = Array(1) { FloatArray(INPUT_SIZE) }
+                tflite.run(input, out)
+                // Compute MSE between input and output
+                var e = 0.0
+                for (i in 0 until INPUT_SIZE) {
+                    val diff = features[i] - out[0][i].toDouble()
+                    e += diff * diff
+                    output[i] = out[0][i]
+                }
+                e / INPUT_SIZE.toDouble()
+            } else {
+                // Pass-through fallback (copy input to output, error ≈ 0)
+                0.0
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "TFLite run failed: ${t.message}", t)
+            LogFileLogger.log(TAG, "TFLite run failed: ${t.message}", t)
+            // On failure, return a neutral small error to avoid breaking pipeline
+            0.0
         }
-        
-        // Simple fallback: compute a basic "reconstruction error" based on feature variance
-        // This simulates what an autoencoder would do without requiring the actual model
-        val mean = features.average()
-        val variance = features.map { (it - mean) * (it - mean) }.average()
-        
-        // Add some noise to make it more realistic
-        val noise = (Math.random() - 0.5) * 0.1
-        val error = variance + noise
-        
-        // Update baseline statistics
+
         updateBaseline(error)
-        
         return error
     }
-    
-    /**
-     * Set baseline statistics from external source
-     * @param mean Baseline mean
-     * @param std Baseline standard deviation
-     */
-    fun setBaselineStats(mean: Double, std: Double): Unit {
+
+    fun setBaselineStats(mean: Double, std: Double) {
         baselineMean = mean
         baselineStd = std
         isBaselineEstablished = true
     }
-    
-    /**
-     * Get current baseline statistics
-     */
+
     fun getBaselineStats(): Pair<Double, Double>? {
-        return if (isBaselineEstablished) {
-            Pair(baselineMean, baselineStd)
-        } else {
-            null
-        }
+        return if (isBaselineEstablished) baselineMean to baselineStd else null
     }
-    
-    /**
-     * Check if baseline is established
-     */
+
     fun isBaselineReady(): Boolean = isBaselineEstablished
-    
-    /**
-     * Reset baseline (for new user or session)
-     */
-    fun resetBaseline(): Unit {
+
+    fun resetBaseline() {
         errorHistory.clear()
         baselineMean = 0.0
         baselineStd = 1.0
         isBaselineEstablished = false
     }
-    
-    /**
-     * Clean up resources
-     */
-    fun close(): Unit {
-        interpreter?.close()
-        interpreter = null
-        isModelLoaded = false
+
+    fun close() {
+        try {
+            interpreter?.close()
+        } catch (_: Throwable) {
+        } finally {
+            interpreter = null
+        }
     }
-    
-    private fun updateBaseline(error: Double): Unit {
+
+    private fun updateBaseline(error: Double) {
         errorHistory.add(error)
-        
-        // Maintain history size
         if (errorHistory.size > maxErrorHistorySize) {
             errorHistory.removeAt(0)
         }
-        
-        // Update baseline statistics
         if (errorHistory.size >= MIN_BASELINE_SAMPLES) {
             baselineMean = errorHistory.average()
-            baselineStd = sqrt(
-                errorHistory.map { (it - baselineMean) * (it - baselineMean) }.average()
-            )
+            val variance = errorHistory.map { (it - baselineMean) * (it - baselineMean) }.average()
+            baselineStd = sqrt(variance).coerceAtLeast(1e-9)
             isBaselineEstablished = true
         }
     }
-    
-    private fun loadModelFile(modelFile: File): MappedByteBuffer {
-        return modelFile.inputStream().use { input ->
-            val channel = input.channel
-            channel.map(
-                java.nio.channels.FileChannel.MapMode.READ_ONLY,
-                0,
-                modelFile.length()
-            )
+
+    private fun loadModelFile(context: Context, assetName: String): MappedByteBuffer {
+        val afd: AssetFileDescriptor = context.assets.openFd(assetName)
+        FileInputStream(afd.fileDescriptor).use { fis ->
+            val channel: FileChannel = fis.channel
+            val startOffset = afd.startOffset
+            val declaredLength = afd.declaredLength
+            return channel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
         }
     }
-    
-    private fun createSimpleAutoencoder(modelFile: File): Unit {
-        // Create a simple autoencoder model using TensorFlow Lite
-        // This is a placeholder - in production, you'd train a proper model
-        
-        val modelBytes = createSimpleModelBytes()
-        modelFile.writeBytes(modelBytes)
-    }
-    
-    private fun createSimpleModelBytes(): ByteArray {
-        // This is a simplified model creation
-        // In practice, you'd use TensorFlow to create and export a proper model
-        
-        // Placeholder: return a minimal TFLite model structure
-        // This is just for demonstration - real implementation would create proper model
-        return ByteArray(1024) { 0 } // Placeholder
-    }
 }
-
-/**
- * Autoencoder model configuration
- */
-data class AutoencoderConfig(
-    val inputSize: Int = 10,
-    val latentSize: Int = 3,
-    val encoderLayers: List<Int> = listOf(8, 5, 3),
-    val decoderLayers: List<Int> = listOf(5, 8, 10)
-)

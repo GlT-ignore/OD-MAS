@@ -19,6 +19,7 @@ class PolicyAgent {
     private var consecutiveLowRiskWindows: Int = 0
     private var trustCredits: Int = MAX_TRUST_CREDITS
     private var lastTrustCreditRestoreTime: Long = 0L
+    private var lastTrustCreditDecrementTime: Long = 0L
     private var isEscalated: Boolean = false
     
     private val _policyState = MutableStateFlow(PolicyState())
@@ -35,6 +36,7 @@ class PolicyAgent {
         private const val CONSECUTIVE_LOW_RISK_LIMIT = 10
         private const val MAX_TRUST_CREDITS = 3
         private const val TRUST_CREDIT_RESTORE_INTERVAL_MS = 30000L // 30 seconds
+        private const val TRUST_CREDIT_DECREMENT_INTERVAL_MS = 10000L // 10 seconds cooldown between decrements in yellow zone
     }
     
     /**
@@ -111,6 +113,7 @@ class PolicyAgent {
         consecutiveLowRiskWindows = 0
         trustCredits = MAX_TRUST_CREDITS
         lastTrustCreditRestoreTime = System.currentTimeMillis()
+        lastTrustCreditDecrementTime = 0L
         isEscalated = false
         
         _policyState.value = PolicyState()
@@ -148,16 +151,21 @@ class PolicyAgent {
     }
     
     private fun updateTrustCredits(sessionRisk: Double, currentTime: Long): Unit {
-        // Decrement trust credits in yellow zone
-        if (sessionRisk in YELLOW_RISK_MIN..YELLOW_RISK_MAX && trustCredits > 0) {
-            trustCredits--
+        // Decrement trust credits in yellow zone, throttled to avoid draining to 0 too quickly
+        if (sessionRisk in YELLOW_RISK_MIN..YELLOW_RISK_MAX &&
+            trustCredits > 0 &&
+            (currentTime - lastTrustCreditDecrementTime) >= TRUST_CREDIT_DECREMENT_INTERVAL_MS
+        ) {
+            trustCredits = (trustCredits - 1).coerceAtLeast(0)
+            lastTrustCreditDecrementTime = currentTime
         }
-        
-        // Restore trust credits when risk is low
-        if (sessionRisk < LOW_RISK_THRESHOLD && 
-            currentTime - lastTrustCreditRestoreTime >= TRUST_CREDIT_RESTORE_INTERVAL_MS &&
-            trustCredits < MAX_TRUST_CREDITS) {
-            trustCredits++
+
+        // Restore trust credits when risk is low, at most once per interval
+        if (sessionRisk < LOW_RISK_THRESHOLD &&
+            (currentTime - lastTrustCreditRestoreTime) >= TRUST_CREDIT_RESTORE_INTERVAL_MS &&
+            trustCredits < MAX_TRUST_CREDITS
+        ) {
+            trustCredits = (trustCredits + 1).coerceAtMost(MAX_TRUST_CREDITS)
             lastTrustCreditRestoreTime = currentTime
         }
     }

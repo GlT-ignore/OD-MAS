@@ -96,9 +96,9 @@ dependencies {
     // Sensors and usage stats
     implementation("androidx.lifecycle:lifecycle-service:2.7.0")
     
-    // ML - TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("com.google.android.gms:play-services-tflite-support:16.0.1")
+
     
     // Performance monitoring
     implementation("androidx.profileinstaller:profileinstaller:1.3.1")

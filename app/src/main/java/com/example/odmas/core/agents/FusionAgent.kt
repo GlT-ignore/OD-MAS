@@ -28,7 +28,7 @@ class FusionAgent {
     companion object {
         private const val WINDOW_DURATION_MS = 3000L // 3 seconds
         private const val WINDOW_OVERLAP = 0.5 // 50% overlap
-        private const val TIER1_THRESHOLD = 30.0 // Run Tier-1 when Tier-0 > 30
+        private const val TIER1_THRESHOLD = 0.30 // Run Tier-1 when Tier-0 > 0.30 (tier0Risk is 0–1)
         private const val TIER1_INTERVAL_MS = 10000L // Run Tier-1 every 10s
         private const val SESSION_WEIGHT_DURATION_MS = 20000L // 20 seconds
         private const val INITIAL_WEIGHT = 0.7
@@ -46,7 +46,7 @@ class FusionAgent {
     
     fun setTier1Baseline(mean: Double, std: Double): Unit {
         baselineMean = mean
-        baselineStd = std
+        baselineStd = if (std.isFinite() && std > 1e-9) std else 1e-9
     }
     
     /**
@@ -55,7 +55,9 @@ class FusionAgent {
      * @return Tier-0 probability p₀ = 1 - CDF_χ²(d², df)
      */
     fun processTier0Risk(mahalanobisDistanceSquared: Double): Double {
-        val p0 = 1.0 - chiSquareCDF(mahalanobisDistanceSquared, DEGREES_OF_FREEDOM)
+        // Use lower-tail CDF so larger d² -> larger anomaly probability.
+        // Previously used 1 - CDF which inverted the signal (large d² gave near 0).
+        val p0 = chiSquareCDF(mahalanobisDistanceSquared, DEGREES_OF_FREEDOM)
         return p0.coerceIn(0.0, 1.0)
     }
     
@@ -65,7 +67,8 @@ class FusionAgent {
      * @return Tier-1 probability p₁ = Φ(z) where z = (e - μₑ)/σₑ
      */
     fun processTier1Risk(reconstructionError: Double): Double {
-        val z = (reconstructionError - baselineMean) / baselineStd
+        val denom = if (baselineStd.isFinite() && baselineStd > 1e-9) baselineStd else 1e-9
+        val z = (reconstructionError - baselineMean) / denom
         val p1 = 1.0 - normalCDF(z) // Upper-tail anomaly
         return p1.coerceIn(0.0, 1.0)
     }

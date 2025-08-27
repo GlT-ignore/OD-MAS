@@ -44,13 +44,56 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
     // Receivers to reflect background touches/typing into the monitoring UI
     private val touchReceiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.example.odmas.TOUCH_DATA") {
+            if (intent?.action == "com.example.odmas.TOUCH_DATA" || intent?.action == "com.example.odmas.TOUCH_DATA_UI") {
+                // Extract 10-D feature vector from broadcast and update UI table fields
+                val features: DoubleArray? = intent.getDoubleArrayExtra("features")
                 val currentTouchData = _sensorState.value.touchData
-                val newTouchData = currentTouchData.copy(
-                    isActive = true,
-                    touchCount = currentTouchData.touchCount + 1
-                )
-                _sensorState.value = _sensorState.value.copy(touchData = newTouchData)
+
+                if (features != null && features.size >= 10) {
+                    // Mapping consistent with TouchAccessibilityService and TouchSensorCollector:
+                    // 0:x, 1:y, 2:pressure, 3:size, 4:dwellSec, 5:velocity, 6:curvature, 7:pressureVar, 8:sizeVar, 9:distance
+                    val dwellMs = ((features[4]).coerceAtLeast(0.0) * 1000.0).toLong()
+                    val pressure = features[2].toFloat().coerceAtLeast(0f)
+                    val size = features[3].toFloat().coerceAtLeast(0f)
+                    val velocity = features[5].toFloat().coerceAtLeast(0f)
+                    val curvature = features[6].toFloat().coerceAtLeast(0f)
+                    val touchX = features[0].toFloat().coerceIn(0f, 1f)
+                    val touchY = features[1].toFloat().coerceIn(0f, 1f)
+
+                    val newTouchData = TouchData(
+                        isActive = true,
+                        dwellTime = dwellMs,
+                        flightTime = currentTouchData.flightTime, // unknown from a11y; keep last
+                        pressure = pressure,
+                        size = size,
+                        velocity = velocity,
+                        curvature = curvature,
+                        touchCount = currentTouchData.touchCount + 1
+                    )
+
+                    // Update primary touch data card
+                    _sensorState.value = _sensorState.value.copy(touchData = newTouchData)
+
+                    // Also reflect coordinates into Raw Sensor Data card while preserving existing motion values
+                    val raw = _sensorState.value.rawSensorData
+                    updateRawSensorData(
+                        accelX = raw.accelX,
+                        accelY = raw.accelY,
+                        accelZ = raw.accelZ,
+                        gyroX = raw.gyroX,
+                        gyroY = raw.gyroY,
+                        gyroZ = raw.gyroZ,
+                        touchX = touchX,
+                        touchY = touchY
+                    )
+                } else {
+                    // Fallback: at least mark activity and increment count so UI is responsive
+                    val newTouchData = currentTouchData.copy(
+                        isActive = true,
+                        touchCount = currentTouchData.touchCount + 1
+                    )
+                    _sensorState.value = _sensorState.value.copy(touchData = newTouchData)
+                }
             }
         }
     }
@@ -74,11 +117,18 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
         startDataCollection()
         // Observe broadcasts from background service/accessibility
         if (Build.VERSION.SDK_INT >= 33) {
+            // Touch from Accessibility and Service-forwarded UI channel
             getApplication<Application>().registerReceiver(
                 touchReceiver,
                 IntentFilter("com.example.odmas.TOUCH_DATA"),
                 Context.RECEIVER_NOT_EXPORTED
             )
+            getApplication<Application>().registerReceiver(
+                touchReceiver,
+                IntentFilter("com.example.odmas.TOUCH_DATA_UI"),
+                Context.RECEIVER_NOT_EXPORTED
+            )
+            // Typing timing channel
             getApplication<Application>().registerReceiver(
                 typingReceiver,
                 IntentFilter("com.example.odmas.TYPING_DATA"),
@@ -86,6 +136,7 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
             )
         } else {
             getApplication<Application>().registerReceiver(touchReceiver, IntentFilter("com.example.odmas.TOUCH_DATA"))
+            getApplication<Application>().registerReceiver(touchReceiver, IntentFilter("com.example.odmas.TOUCH_DATA_UI"))
             getApplication<Application>().registerReceiver(typingReceiver, IntentFilter("com.example.odmas.TYPING_DATA"))
         }
     }

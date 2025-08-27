@@ -7,11 +7,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.odmas.utils.BiometricAuth
 
 @Composable
 fun BiometricPromptSheet(
@@ -22,6 +24,7 @@ fun BiometricPromptSheet(
     onCancel: () -> Unit
 ) {
     if (isVisible) {
+        val context = LocalContext.current
         Dialog(
             onDismissRequest = onCancel,
             properties = DialogProperties(
@@ -29,6 +32,27 @@ fun BiometricPromptSheet(
                 dismissOnClickOutside = false
             )
         ) {
+            // Auto-launch the system biometric prompt once when visible
+            val launchedOnce = remember { mutableStateOf(false) }
+            LaunchedEffect(isVisible) {
+                if (isVisible && !launchedOnce.value) {
+                    val launched = BiometricAuth.authenticate(
+                        context = context,
+                        title = "Verify your identity",
+                        subtitle = reason,
+                        description = "Confirm it's you to continue",
+                        confirmationRequired = false,
+                        onSuccess = onSuccess,
+                        onFailure = onFailure,
+                        onCancel = onCancel
+                    )
+                    launchedOnce.value = true
+                    if (!launched) {
+                        onFailure()
+                    }
+                }
+            }
+
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -91,7 +115,23 @@ fun BiometricPromptSheet(
                         }
                         
                         Button(
-                            onClick = onSuccess,
+                            onClick = {
+                                // Launch system biometric prompt; route callbacks back to caller
+                                val launched = BiometricAuth.authenticate(
+                                    context = context,
+                                    title = "Verify your identity",
+                                    subtitle = reason,
+                                    description = "Confirm it's you to continue",
+                                    confirmationRequired = false,
+                                    onSuccess = onSuccess,
+                                    onFailure = onFailure,
+                                    onCancel = onCancel
+                                )
+                                if (!launched) {
+                                    // If prompt couldn't launch (no activity/capability), treat as failure
+                                    onFailure()
+                                }
+                            },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary

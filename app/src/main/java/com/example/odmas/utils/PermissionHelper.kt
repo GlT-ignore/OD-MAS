@@ -23,13 +23,17 @@ object PermissionHelper {
     const val REQUEST_CODE_ACCESSIBILITY_SERVICE = 1004
     
     // Required runtime permissions
-    private val RUNTIME_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        arrayOf(
+    private val RUNTIME_PERMISSIONS = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+            Manifest.permission.ACTIVITY_RECOGNITION,
+            Manifest.permission.BODY_SENSORS,
+            Manifest.permission.POST_NOTIFICATIONS
+        )
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
             Manifest.permission.ACTIVITY_RECOGNITION,
             Manifest.permission.BODY_SENSORS
         )
-    } else {
-        arrayOf(
+        else -> arrayOf(
             Manifest.permission.BODY_SENSORS
         )
     }
@@ -157,15 +161,9 @@ object PermissionHelper {
         if (!hasUsageStatsPermission(context)) {
             missing.add("Usage Stats Access")
         }
-        
-        if (!hasSystemAlertWindowPermission(context)) {
-            missing.add("Display over other apps")
-        }
-        
         if (!isAccessibilityServiceEnabled(context)) {
             missing.add("Accessibility Service")
         }
-        
         return missing
     }
     
@@ -176,6 +174,7 @@ object PermissionHelper {
         return when (permission) {
             Manifest.permission.ACTIVITY_RECOGNITION -> "Physical Activity Recognition"
             Manifest.permission.BODY_SENSORS -> "Body Sensors"
+            Manifest.permission.POST_NOTIFICATIONS -> "Notifications"
             "Usage Stats Access" -> "App Usage Statistics"
             "Display over other apps" -> "Display over other apps"
             "Accessibility Service" -> "Accessibility Service for Touch Monitoring"
@@ -190,6 +189,7 @@ object PermissionHelper {
         return when (permission) {
             Manifest.permission.ACTIVITY_RECOGNITION -> "Required to detect device movement patterns for security analysis"
             Manifest.permission.BODY_SENSORS -> "Required to access motion sensors for behavioral biometrics"
+            Manifest.permission.POST_NOTIFICATIONS -> "Required to show foreground service notifications on Android 13+"
             "Usage Stats Access" -> "Required to monitor app usage patterns for security analysis"
             "Display over other apps" -> "Required for system-wide touch monitoring"
             "Accessibility Service" -> "Required to detect touch events across all apps for security monitoring"

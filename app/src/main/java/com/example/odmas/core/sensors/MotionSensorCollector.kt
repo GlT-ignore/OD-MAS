@@ -23,8 +23,8 @@ import kotlin.math.sqrt
 class MotionSensorCollector(private val context: Context) : SensorEventListener {
     
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val accelerometer: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gyroscope: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     
     private val _motionFeatures = MutableStateFlow<MotionFeatures?>(null)
     val motionFeatures: StateFlow<MotionFeatures?> = _motionFeatures.asStateFlow()
@@ -45,19 +45,19 @@ class MotionSensorCollector(private val context: Context) : SensorEventListener 
      * Start sensor monitoring
      */
     fun startMonitoring(): Boolean {
-        val accelerometerRegistered = sensorManager.registerListener(
-            this,
-            accelerometer,
-            SAMPLING_RATE
-        )
-        
-        val gyroscopeRegistered = sensorManager.registerListener(
-            this,
-            gyroscope,
-            SAMPLING_RATE
-        )
-        
-        return accelerometerRegistered && gyroscopeRegistered
+        var anyRegistered = false
+
+        accelerometer?.let {
+            val ok = sensorManager.registerListener(this, it, SAMPLING_RATE)
+            anyRegistered = anyRegistered || ok
+        }
+
+        gyroscope?.let {
+            val ok = sensorManager.registerListener(this, it, SAMPLING_RATE)
+            anyRegistered = anyRegistered || ok
+        }
+
+        return anyRegistered
     }
     
     /**
@@ -130,16 +130,35 @@ class MotionSensorCollector(private val context: Context) : SensorEventListener 
     }
     
     private fun processMotionFeatures() {
-        if (accelerometerHistory.size < 10 || gyroscopeHistory.size < 10) {
+        val accelReady = accelerometerHistory.size >= 10
+        val gyroReady = gyroscopeHistory.size >= 10
+
+        if (!accelReady && !gyroReady) {
             return
         }
-        
-        // Calculate accelerometer features
-        val accelFeatures = calculateAccelerometerFeatures()
-        
-        // Calculate gyroscope features
-        val gyroFeatures = calculateGyroscopeFeatures()
-        
+
+        // Calculate accelerometer features (or defaults)
+        val accelFeatures = if (accelReady) {
+            calculateAccelerometerFeatures()
+        } else {
+            AccelerometerFeatures(
+                magnitude = 0.0,
+                variance = 0.0,
+                peak = 0.0
+            )
+        }
+
+        // Calculate gyroscope features (or defaults)
+        val gyroFeatures = if (gyroReady) {
+            calculateGyroscopeFeatures()
+        } else {
+            GyroscopeFeatures(
+                magnitude = 0.0,
+                variance = 0.0,
+                peak = 0.0
+            )
+        }
+
         // Combine features
         val features = MotionFeatures(
             accelerationMagnitude = accelFeatures.magnitude,
@@ -152,7 +171,7 @@ class MotionSensorCollector(private val context: Context) : SensorEventListener 
             tremorLevel = calculateTremorLevel(),
             orientationChange = calculateOrientationChange()
         )
-        
+
         _motionFeatures.value = features
     }
     
@@ -241,8 +260,9 @@ class MotionSensorCollector(private val context: Context) : SensorEventListener 
     
     fun getFeatureVector(): DoubleArray? {
         val features = _motionFeatures.value ?: return null
-        
-        return doubleArrayOf(
+
+        // Build vector and sanitize to avoid NaN/Inf propagating into Tier‑0/1 pipelines
+        val arr = doubleArrayOf(
             features.accelerationMagnitude,
             features.accelerationVariance,
             features.accelerationPeak,
@@ -254,6 +274,13 @@ class MotionSensorCollector(private val context: Context) : SensorEventListener 
             features.orientationChange,
             0.0 // Placeholder for 10th feature to match Tier-0 requirements
         )
+        for (i in arr.indices) {
+            val v = arr[i]
+            if (v.isNaN() || v == Double.POSITIVE_INFINITY || v == Double.NEGATIVE_INFINITY) {
+                arr[i] = 0.0
+            }
+        }
+        return arr
     }
     
     fun clearFeatures() {

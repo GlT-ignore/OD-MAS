@@ -4,7 +4,8 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import com.example.odmas.utils.LogFileLogger
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,7 +26,7 @@ import com.example.odmas.utils.PermissionHelper
 import com.example.odmas.viewmodels.SecurityViewModel
 import com.example.odmas.viewmodels.SensorMonitoringViewModel
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     
     companion object {
         private const val TAG = "MainActivity"
@@ -45,6 +46,15 @@ class MainActivity : ComponentActivity() {
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize file logger and global crash handler for post-mortem logs
+        LogFileLogger.init(applicationContext)
+        Thread.setDefaultUncaughtExceptionHandler { thread, ex ->
+            try {
+                LogFileLogger.log("Uncaught", "Thread ${thread.name}: ${ex.message}", ex)
+            } catch (_: Throwable) { }
+        }
+
         enableEdgeToEdge()
         
         setContent {
@@ -93,6 +103,7 @@ class MainActivity : ComponentActivity() {
                     // Permission gate screen
                     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                         PermissionGateScreen(
+                            modifier = Modifier.padding(innerPadding),
                             onAllPermissionsGranted = {
                                 allPermissionsGranted = true
                                 Log.d(TAG, "All permissions granted - switching to main app")

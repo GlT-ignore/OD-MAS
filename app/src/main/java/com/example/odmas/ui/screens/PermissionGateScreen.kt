@@ -11,6 +11,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,6 +29,7 @@ import com.example.odmas.utils.PermissionHelper
  */
 @Composable
 fun PermissionGateScreen(
+    modifier: Modifier = Modifier,
     onAllPermissionsGranted: () -> Unit
 ) {
     val context = LocalContext.current
@@ -51,7 +54,7 @@ fun PermissionGateScreen(
     }
     
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -90,7 +93,7 @@ fun PermissionGateScreen(
         if (missingPermissions.isNotEmpty()) {
             val totalPermissions = 5 // Runtime + special permissions
             val grantedPermissions = totalPermissions - missingPermissions.size
-            val progress = grantedPermissions.toFloat() / totalPermissions
+            val progressValue = grantedPermissions.toFloat() / totalPermissions
             
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -111,7 +114,7 @@ fun PermissionGateScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     
                     LinearProgressIndicator(
-                        progress = progress,
+                        progress = { progressValue },
                         modifier = Modifier.fillMaxWidth(),
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -251,9 +254,9 @@ private fun PermissionCard(
 private fun getPermissionIcon(permission: String): ImageVector {
     return when (permission) {
         "Usage Stats Access" -> Icons.Default.Analytics
-        "Display over other apps" -> Icons.Default.OpenInNew
+        "Display over other apps" -> Icons.AutoMirrored.Filled.OpenInNew
         "Accessibility Service" -> Icons.Default.TouchApp
-        "Physical Activity Recognition" -> Icons.Default.DirectionsRun
+        "Physical Activity Recognition" -> Icons.AutoMirrored.Filled.DirectionsRun
         "Body Sensors" -> Icons.Default.Sensors
         else -> Icons.Default.Security
     }
