@@ -28,11 +28,11 @@ class FusionAgent {
     companion object {
         private const val WINDOW_DURATION_MS = 3000L // 3 seconds
         private const val WINDOW_OVERLAP = 0.5 // 50% overlap
-        private const val TIER1_THRESHOLD = 30.0 // Run Tier-1 when Tier-0 > 30
-        private const val TIER1_INTERVAL_MS = 10000L // Run Tier-1 every 10s
-        private const val SESSION_WEIGHT_DURATION_MS = 20000L // 20 seconds
-        private const val INITIAL_WEIGHT = 0.7
-        private const val NORMAL_WEIGHT = 0.5
+        private const val TIER1_THRESHOLD = 15.0 // Run Tier-1 when Tier-0 > 15 (more sensitive)
+        private const val TIER1_INTERVAL_MS = 5000L // Run Tier-1 every 5s (more frequent)
+        private const val SESSION_WEIGHT_DURATION_MS = 10000L // 10 seconds
+        private const val INITIAL_WEIGHT = 0.3  // Favor Tier-1 initially
+        private const val NORMAL_WEIGHT = 0.2   // Tier-0 gets low weight due to reliability issues
         private const val EMA_ALPHA = 0.3
         private const val DEGREES_OF_FREEDOM = 10 // Adjust based on feature count
     }
@@ -55,8 +55,11 @@ class FusionAgent {
      * @return Tier-0 probability p₀ = 1 - CDF_χ²(d², df)
      */
     fun processTier0Risk(mahalanobisDistanceSquared: Double): Double {
+        // Apply more conservative risk calculation for Tier-0
         val p0 = 1.0 - chiSquareCDF(mahalanobisDistanceSquared, DEGREES_OF_FREEDOM)
-        return p0.coerceIn(0.0, 1.0)
+        // Dampen high Tier-0 risks since they're often false positives
+        val dampened = if (p0 > 0.8) 0.6 + (p0 - 0.8) * 0.5 else p0
+        return dampened.coerceIn(0.0, 1.0)
     }
     
     /**

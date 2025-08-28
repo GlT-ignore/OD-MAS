@@ -31,6 +31,8 @@ class SecurityManager(private val context: Context) {
     private var lastFeatures: DoubleArray? = null
     private var lastModality: Modality? = null
     private var stateTickerJob: kotlinx.coroutines.Job? = null
+    private var calibrationMode = false
+    private var testMode = false
 
     companion object {
         private const val PROCESSING_INTERVAL_MS = 3000L
@@ -104,12 +106,23 @@ class SecurityManager(private val context: Context) {
         coroutineScope.launch {
             try {
                 val learningDone = tier1Agent.isCalibrated()
-                if (!learningDone) {
+                
+                // During calibration mode, only collect data - don't calculate risk
+                if (calibrationMode || !learningDone) {
+                    Log.d(TAG, "Calibration mode: collecting data only")
                     tier0Agent.addFeatures(features, modality)
                     tier1Agent.submitCalibrationSample(features, modality)
                     tier1Agent.trainAllIfNeeded()
+                    // Chaquopy baseline will be updated when calibration completes
                     lastFeatures = features
                     lastModality = modality
+                    updateSecurityState(0.0, PolicyAction.Monitor)
+                    return@launch
+                }
+                
+                // Skip risk calculation if not in test mode after calibration
+                if (!testMode && learningDone) {
+                    Log.d(TAG, "Calibration complete but not in test mode - standby")
                     updateSecurityState(0.0, PolicyAction.Monitor)
                     return@launch
                 }
@@ -126,34 +139,66 @@ class SecurityManager(private val context: Context) {
                     Log.d(TAG, "Tier-0 risk: $tier0Risk")
                     var tier1Risk: Double? = null
                     if (fusionAgent.shouldRunTier1(tier0Risk)) {
-                        val touchW = tier0Agent.getWindowFeaturesFor(Modality.TOUCH)
-                        val typingW = tier0Agent.getWindowFeaturesFor(Modality.TYPING)
-                        var touchScore: Double? = null
-                        var typingScore: Double? = null
-                        try { if (touchW != null) touchScore = tier1Agent.computeTier1Probability(touchW, Modality.TOUCH) } catch (_: Throwable) {}
-                        try { if (typingW != null) typingScore = tier1Agent.computeTier1Probability(typingW, Modality.TYPING) } catch (_: Throwable) {}
-                        val continuousTouching = (lastModality == Modality.TOUCH)
-                        val weighted = mutableListOf<Pair<Double, Double>>()
-                        touchScore?.let { s -> weighted.add(s to if (continuousTouching) 0.6 else 0.4) }
-                        typingScore?.let { s -> weighted.add(s to 0.6) }
-                        val sumW = weighted.sumOf { it.second }
-                        tier1Risk = if (sumW > 0.0) weighted.sumOf { it.first * it.second } / sumW else null
-                        Log.d(TAG, "Tier-1 scores: touch=${touchScore ?: -1.0}, typing=${typingScore ?: -1.0}, fused=${tier1Risk ?: -1.0}")
+                        // Only use the current modality for risk calculation
+                        when (modality) {
+                            Modality.TOUCH -> {
+                                val touchW = tier0Agent.getWindowFeaturesFor(Modality.TOUCH)
+                                try { 
+                                    if (touchW != null) {
+                                        tier1Risk = tier1Agent.computeTier1Probability(touchW, Modality.TOUCH)
+                                        Log.d(TAG, "Tier-1 touch risk: $tier1Risk")
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.e(TAG, "Touch risk calculation error: ${e.message}")
+                                }
+                            }
+                            Modality.TYPING -> {
+                                val typingW = tier0Agent.getWindowFeaturesFor(Modality.TYPING)
+                                try {
+                                    if (typingW != null) {
+                                        tier1Risk = tier1Agent.computeTier1Probability(typingW, Modality.TYPING)
+                                        Log.d(TAG, "Tier-1 typing risk: $tier1Risk")
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.e(TAG, "Typing risk calculation error: ${e.message}")
+                                }
+                            }
+                            else -> {
+                                Log.d(TAG, "Unknown modality, skipping Tier-1 risk calculation")
+                            }
+                        }
                         if (tier1Risk != null) fusionAgent.markTier1Run()
                     }
                     val fusedRisk = fusionAgent.fuseRisks(tier0Risk, tier1Risk)
+                    Log.d(TAG, "=== FUSION CALCULATION ===")
+                    Log.d(TAG, "Input risks - Tier0: $tier0Risk, Tier1: $tier1Risk")
+                    Log.d(TAG, "Fused risk result: $fusedRisk")
+                    Log.d(TAG, "Chaquopy confidence: ${chaquopyResult.confidence}%")
+                    
                     val sessionRisk = if (chaquopyResult.confidence > 80f) {
-                        0.5 * fusedRisk + 0.5 * chaquopyResult.riskScore.toDouble()
+                        val chaquopyWeight = 0.5
+                        val fusedWeight = 0.5
+                        val weightedResult = fusedWeight * fusedRisk + chaquopyWeight * chaquopyResult.riskScore.toDouble()
+                        Log.d(TAG, "HIGH CONFIDENCE: Using weighted combination")
+                        Log.d(TAG, "  Fused risk: $fusedRisk (weight: $fusedWeight)")
+                        Log.d(TAG, "  Chaquopy risk: ${chaquopyResult.riskScore} (weight: $chaquopyWeight)")
+                        Log.d(TAG, "  Final weighted: $weightedResult")
+                        weightedResult
                     } else {
+                        Log.d(TAG, "LOW CONFIDENCE: Using fused risk only")
+                        Log.d(TAG, "  Final risk: $fusedRisk")
                         fusedRisk
                     }
-                    Log.d(TAG, "Fused session risk (final): $sessionRisk")
+                    Log.d(TAG, "=== FINAL SESSION RISK: $sessionRisk ===")
                     LogFileLogger.log(TAG, "Fused session risk: $sessionRisk, tier0Ready=${tier0Agent.isBaselineReady()}, tier1Ready=${tier1Agent.isAnyModalityReady()}")
                     val policyAction = policyAgent.processSessionRisk(sessionRisk)
                     updateSecurityState(sessionRisk, policyAction)
                     if (policyAction == PolicyAction.Escalate) handleEscalation()
                 } else {
+                    Log.d(TAG, "=== FALLBACK: MAHALANOBIS NOT AVAILABLE ===")
+                    Log.d(TAG, "Using Chaquopy risk only: ${chaquopyResult.riskScore}")
                     val sessionRisk = chaquopyResult.riskScore.toDouble()
+                    Log.d(TAG, "=== FINAL SESSION RISK: $sessionRisk ===")
                     val policyAction = policyAgent.processSessionRisk(sessionRisk)
                     updateSecurityState(sessionRisk, policyAction)
                     if (policyAction == PolicyAction.Escalate) handleEscalation()
@@ -166,13 +211,24 @@ class SecurityManager(private val context: Context) {
     }
 
     fun onBiometricSuccess(): Unit {
+        Log.d(TAG, "=== BIOMETRIC SUCCESS ===")
+        Log.d(TAG, "Resetting policy state and trust credits")
         policyAgent.onBiometricSuccess()
-        updateSecurityState()
+        // Force update with zero session risk
+        updateSecurityState(sessionRisk = 0.0, policyAction = PolicyAction.Monitor)
+        val currentState = _securityState.value
+        Log.d(TAG, "Post-success state: risk=${currentState.sessionRisk}, escalated=${currentState.isEscalated}, credits=${currentState.trustCredits}")
+        Log.d(TAG, "=== BIOMETRIC SUCCESS COMPLETE ===")
     }
 
     fun onBiometricFailure(): Unit {
+        Log.d(TAG, "=== BIOMETRIC FAILURE ===")
+        Log.d(TAG, "Keeping escalated state for retry")
         policyAgent.onBiometricFailure()
         updateSecurityState()
+        val currentState = _securityState.value
+        Log.d(TAG, "Post-failure state: risk=${currentState.sessionRisk}, escalated=${currentState.isEscalated}, credits=${currentState.trustCredits}")
+        Log.d(TAG, "=== BIOMETRIC FAILURE COMPLETE ===")
     }
 
     fun reset(): Unit {
@@ -180,7 +236,24 @@ class SecurityManager(private val context: Context) {
         tier1Agent.resetBaseline()
         fusionAgent.initializeSession()
         policyAgent.reset()
+        calibrationMode = false
+        testMode = false
         updateSecurityState()
+    }
+    
+    fun setCalibrationMode(enabled: Boolean) {
+        calibrationMode = enabled
+        Log.d(TAG, "Calibration mode: $calibrationMode")
+        if (!enabled) {
+            // Calibration complete - finalize models
+            tier1Agent.trainAllIfNeeded()
+            Log.d(TAG, "Calibration completed, models trained")
+        }
+    }
+    
+    fun setTestMode(enabled: Boolean) {
+        testMode = enabled
+        Log.d(TAG, "Test mode: $testMode")
     }
 
     fun seedDemoBaseline(): Unit {
@@ -218,6 +291,20 @@ class SecurityManager(private val context: Context) {
      */
     fun onTypingEvent(dwellMs: Long, flightMs: Long, isSpace: Boolean) {
         tier1Agent.submitTypingTiming(dwellMs, flightMs, isSpace)
+    }
+    
+    /**
+     * Track characters typed in UI text fields during calibration
+     */
+    fun onCharacterTyped(character: Char) {
+        if (calibrationMode) {
+            // Count characters during calibration
+            val dwellMs = 150L // Estimated for UI typing
+            val flightMs = 50L  // Estimated
+            val isSpace = (character == ' ')
+            tier1Agent.submitTypingTiming(dwellMs, flightMs, isSpace)
+            Log.d(TAG, "Character typed during calibration: '$character' (${tier1Agent.getTypingProgress()})")
+        }
     }
 
     private fun updateSecurityState(

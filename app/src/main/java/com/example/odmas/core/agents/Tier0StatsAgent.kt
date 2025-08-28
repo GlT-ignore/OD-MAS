@@ -19,9 +19,9 @@ class Tier0StatsAgent {
 
     private var lastModalitySeen: Modality? = null
 
-    private val windowSize = 30
-    private val overlapSize = 15
-    private val minBaselineSamples = 50
+    private val windowSize = 10  // Smaller window for more recent behavior
+    private val overlapSize = 5
+    private val minBaselineSamples = 25  // Reduce to work with calibration data
     private val featureCount = 10
 
     fun addFeatures(features: DoubleArray, modality: Modality) {
@@ -31,7 +31,7 @@ class Tier0StatsAgent {
         var currentSize: Int
         synchronized(mb.lock) {
             mb.buffer.add(clean)
-            if (mb.buffer.size > windowSize * 2) mb.buffer.removeAt(0)
+            if (mb.buffer.size > windowSize * 4) mb.buffer.removeAt(0)  // Keep more history
             currentSize = mb.buffer.size
         }
         lastModalitySeen = modality
@@ -44,7 +44,10 @@ class Tier0StatsAgent {
             computeMahalanobisDistance(modality)?.let { d2Values.add(it) }
         }
         if (d2Values.isEmpty()) return null
-        return d2Values.maxOrNull()
+        // Use average instead of max to be less aggressive
+        val avgD2 = d2Values.average()
+        // Normalize the distance to be more reasonable
+        return (avgD2 * 0.1).coerceIn(0.0, 2.0)  // Scale down for more reasonable risk
     }
 
     private fun computeMahalanobisDistance(modality: Modality): Double? {

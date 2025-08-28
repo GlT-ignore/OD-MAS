@@ -34,6 +34,16 @@ import com.example.odmas.viewmodels.SensorMonitoringViewModel
 import com.example.odmas.utils.PermissionHelper
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material3.TextField
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.SoftwareKeyboardController
+import kotlinx.coroutines.delay
 
 @Composable
 fun MainScreen(
@@ -45,6 +55,21 @@ fun MainScreen(
     val uiState by viewModel.uiState.collectAsState()
     val biometricState by viewModel.biometricPromptState.collectAsState()
     var showCalibrationPromptSheet by remember { mutableStateOf(false) }
+    
+    // Calibration flow state
+    var calibrationFlowActive by remember { mutableStateOf(false) }
+    var testModeActive by remember { mutableStateOf(false) }
+    var cooldownTimeLeft by remember { mutableStateOf(0) }
+    
+    // Cooldown timer effect
+    LaunchedEffect(cooldownTimeLeft) {
+        if (cooldownTimeLeft > 0) {
+            while (cooldownTimeLeft > 0) {
+                kotlinx.coroutines.delay(1000)
+                cooldownTimeLeft--
+            }
+        }
+    }
     
     // Make screen scrollable to ensure all controls are reachable on small screens
     Column(
@@ -128,15 +153,34 @@ fun MainScreen(
         
         Spacer(modifier = Modifier.height(32.dp))
         
-        // Calibration progress (motion temporarily disabled)
-        CalibrationCard(
+        // POC Demo Controls
+        DemoCalibrationCard(
             isLearning = uiState.securityState.isLearning,
-            progressPercentRemaining = uiState.securityState.baselineProgressSec,
+            calibrationFlowActive = calibrationFlowActive,
+            testModeActive = testModeActive,
+            cooldownTimeLeft = cooldownTimeLeft,
             stage = uiState.securityState.calibrationStage,
-            motion = 0 to 0,
-            touch = uiState.securityState.touchCount to uiState.securityState.touchTarget,
-            typing = uiState.securityState.typingCount to uiState.securityState.typingTarget,
-            onOpenPrompts = { showCalibrationPromptSheet = true }
+            touchProgress = uiState.securityState.touchCount to uiState.securityState.touchTarget,
+            typingProgress = uiState.securityState.typingCount to uiState.securityState.typingTarget,
+            onStartCalibration = { 
+                calibrationFlowActive = true
+                viewModel.startCalibrationFlow()
+                showCalibrationPromptSheet = true 
+            },
+            onStartTest = {
+                testModeActive = true
+                viewModel.startTestMode()
+            },
+            onStopTest = {
+                testModeActive = false
+                viewModel.stopTestMode()
+            },
+            onResetCalibration = {
+                calibrationFlowActive = false
+                testModeActive = false
+                cooldownTimeLeft = 0
+                viewModel.resetSecurity()
+            }
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -210,7 +254,7 @@ fun MainScreen(
     // Guided calibration sheet
     val ctx = LocalContext.current
     CalibrationGuidedSheet(
-        isVisible = showCalibrationPromptSheet && uiState.securityState.isLearning,
+        isVisible = showCalibrationPromptSheet && calibrationFlowActive,
         stage = uiState.securityState.calibrationStage,
         motion = 0 to 0,
         touch = uiState.securityState.touchCount to uiState.securityState.touchTarget,
@@ -218,20 +262,29 @@ fun MainScreen(
         onDismiss = { showCalibrationPromptSheet = false },
         onOpenA11y = { PermissionHelper.requestAccessibilityServicePermission(ctx as android.app.Activity) },
         onOpenUsageStats = { PermissionHelper.requestUsageStatsPermission(ctx as android.app.Activity) },
-        onOpenTextField = { onNavigateToSensors() }
+        onOpenTextField = { /* No longer redirects to sensors */ },
+        onCalibrationComplete = { 
+            calibrationFlowActive = false
+            showCalibrationPromptSheet = false
+            cooldownTimeLeft = 30
+            viewModel.completeCalibrationFlow()
+        }
     )
 }
 @Composable
-private fun CalibrationCard(
+private fun DemoCalibrationCard(
     isLearning: Boolean,
-    progressPercentRemaining: Int,
+    calibrationFlowActive: Boolean,
+    testModeActive: Boolean,
+    cooldownTimeLeft: Int,
     stage: String,
-    motion: Pair<Int, Int>,
-    touch: Pair<Int, Int>,
-    typing: Pair<Int, Int>,
-    onOpenPrompts: () -> Unit
+    touchProgress: Pair<Int, Int>,
+    typingProgress: Pair<Int, Int>,
+    onStartCalibration: () -> Unit,
+    onStartTest: () -> Unit,
+    onStopTest: () -> Unit,
+    onResetCalibration: () -> Unit
 ) {
-    if (!isLearning) return
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -239,73 +292,105 @@ private fun CalibrationCard(
         )
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            var elapsedSec by remember { mutableStateOf(0) }
-            LaunchedEffect(isLearning) {
-                elapsedSec = 0
-                while (isLearning) {
-                    kotlinx.coroutines.delay(1000)
-                    elapsedSec += 1
-                }
-            }
             Text(
-                text = "Calibration in progress",
+                text = "🎯 POC Demo - On-Device Behavioral Security",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            LinearProgressIndicator(
-                progress = (100 - progressPercentRemaining).coerceIn(0, 100) / 100f,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val donePercent = (100 - progressPercentRemaining).coerceIn(0, 100)
-                Text(
-                    text = "Progress: $donePercent%",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                val mm = (elapsedSec / 60)
-                val ss = (elapsedSec % 60)
-                val timeStr = "%02d:%02d".format(mm, ss)
-                Text(
-                    text = "Elapsed: $timeStr",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            when {
+                calibrationFlowActive -> {
+                    Text("📝 Calibration in Progress", fontWeight = FontWeight.Medium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Touch", style = MaterialTheme.typography.labelSmall)
+                            Text("${touchProgress.first}/${touchProgress.second}")
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Typing", style = MaterialTheme.typography.labelSmall)
+                            Text("${typingProgress.first}/${typingProgress.second}")
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Stage", style = MaterialTheme.typography.labelSmall)
+                            Text(stage)
+                        }
+                    }
+                }
+                cooldownTimeLeft > 0 -> {
+                    Text("⏳ Baseline Creation Complete", fontWeight = FontWeight.Medium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Cooldown: ${cooldownTimeLeft}s")
+                    LinearProgressIndicator(
+                        progress = (30 - cooldownTimeLeft) / 30f,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                testModeActive -> {
+                    Text("🔍 Test Mode - Monitoring Risk", fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Interact normally to test behavioral detection", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            onStopTest()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("End Test")
+                    }
+                }
+                else -> {
+                    Text("Ready for Demo", fontWeight = FontWeight.Medium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Follow the calibration flow to establish your behavioral baseline", style = MaterialTheme.typography.bodySmall)
+                }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Stage: $stage",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Motion", style = MaterialTheme.typography.labelSmall)
-                    Text("${motion.first}/${motion.second}")
+            
+            Spacer(modifier = Modifier.height(12.dp))
+            
+            // Demo buttons
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onStartCalibration,
+                    enabled = !calibrationFlowActive && cooldownTimeLeft == 0,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Calibrate")
                 }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Touch", style = MaterialTheme.typography.labelSmall)
-                    Text("${touch.first}/${touch.second}")
-                }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Typing", style = MaterialTheme.typography.labelSmall)
-                    Text("${typing.first}/${typing.second}")
+                OutlinedButton(
+                    onClick = onStartTest,
+                    enabled = !calibrationFlowActive && cooldownTimeLeft == 0 && !isLearning,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Test")
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
             OutlinedButton(
-                onClick = onOpenPrompts,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Open Calibration Guide") }
+                onClick = onResetCalibration,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Reset All")
+            }
         }
     }
 }
@@ -322,7 +407,8 @@ private fun CalibrationGuidedSheet(
     onDismiss: () -> Unit,
     onOpenA11y: () -> Unit,
     onOpenUsageStats: () -> Unit,
-    onOpenTextField: () -> Unit
+    onOpenTextField: () -> Unit,
+    onCalibrationComplete: () -> Unit
 ) {
     if (!isVisible) return
     val context = LocalContext.current
@@ -339,105 +425,238 @@ private fun CalibrationGuidedSheet(
             Spacer(modifier = Modifier.height(8.dp))
             when (stage) {
                 "TOUCH" -> {
-                    Text("Tap anywhere on the screen ~30 times at your normal pace.")
+                    Text("Touch calibration must be done outside the app to capture natural behavior.")
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("Progress: ${touch.first}/${touch.second}")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    // Built-in tap area so taps count without leaving this sheet
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.primaryContainer)
-                            .pointerInput(Unit) {
-                                detectTapGestures {
-                                    // Send a calibrated touch vector via the same broadcast as a11y
-                                    val dwellMs = 150L
-                                    val now = System.currentTimeMillis()
-                                    val pSeed = (now % 17).toInt()
-                                    val sSeed = ((now / 3) % 19).toInt()
-                                    val pressure = (0.55 + 0.20 * ((pSeed % 11) / 10.0 - 0.5)).coerceIn(0.3, 0.9)
-                                    val size = (0.65 + 0.20 * ((sSeed % 9) / 8.0 - 0.5)).coerceIn(0.4, 0.95)
-                                    val dwellSec = (dwellMs.toDouble() / 1000.0).coerceIn(0.0, 2.0)
-                                    val velocity = (0.2 + (120.0 / dwellMs.coerceAtLeast(60).toDouble())).coerceIn(0.1, 1.0)
-                                    val curvature = 0.1
-                                    val pressureVar = (0.01 + 0.02 * ((pSeed % 7) / 6.0)).coerceIn(0.0, 0.1)
-                                    val sizeVar = (0.01 + 0.02 * ((sSeed % 5) / 4.0)).coerceIn(0.0, 0.1)
-                                    val distance = (velocity * dwellSec).coerceIn(0.0, 1.0)
-                                    val features = doubleArrayOf(
-                                        0.5, 0.5, pressure, size, dwellSec, velocity, curvature, pressureVar, sizeVar, distance
-                                    )
-                                    try {
-                                        val intent = android.content.Intent("com.example.odmas.TOUCH_DATA").setPackage(context.packageName)
-                                        intent.putExtra("features", features)
-                                        context.sendBroadcast(intent)
-                                    } catch (_: Exception) {}
-                                }
-                            },
-                        contentAlignment = Alignment.Center
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
                     ) {
-                        Text("Tap here to register touches", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.TouchApp,
+                                contentDescription = "Touch",
+                                modifier = Modifier.size(48.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "1. Minimize this app",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                "2. Swipe, scroll, and tap normally (varied movements)",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                "3. Return to this app when done",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    // Minimize the app to background
+                                    val activity = context as? android.app.Activity
+                                    activity?.moveTaskToBack(true)
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            ) {
+                                Icon(Icons.Default.Home, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Minimize App")
+                            }
+                        }
                     }
                 }
                 "TYPING" -> {
-                    Text("Type a sentence in any text field (e.g. Sensors screen). Space keys count words.")
+                    var typingText by remember { mutableStateOf("") }
+                    val focusRequester = remember { FocusRequester() }
+                    val keyboardController = LocalSoftwareKeyboardController.current
+                    
+                    // Sample sentences for comprehensive typing calibration
+                    val calibrationSentences = listOf(
+                        "The quick brown fox jumps over the lazy dog. This sentence contains every letter and common patterns.",
+                        "Password123! contains uppercase, lowercase, numbers, and special characters for complete pattern analysis.",
+                        "Rhythm and timing in typing reveal unique behavioral patterns including dwell time and flight time measurements.",
+                        "Mobile security systems analyze touch pressure, finger size, movement velocity, and acceleration patterns.",
+                        "Authentication happens continuously and seamlessly in the background without interrupting user experience."
+                    )
+                    val currentSentence by remember { mutableStateOf(calibrationSentences.random()) }
+                    
+                    Text("Type the sentence below to calibrate your typing pattern:")
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("Progress: ${typing.first}/${typing.second}")
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Sample sentence to type
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                "Type this sentence:",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                currentSentence,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    // Text field for typing calibration
+                    OutlinedTextField(
+                        value = typingText,
+                        onValueChange = { newText -> 
+                            // Track character additions for calibration
+                            if (newText.length > typingText.length) {
+                                val addedChar = newText[typingText.length]
+                                // Send to SecurityManager for character counting
+                                val securityManager = com.example.odmas.core.SecurityManager.getInstance(context)
+                                securityManager.onCharacterTyped(addedChar)
+                            }
+                            typingText = newText 
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(focusRequester),
+                        label = { Text("Type here for calibration") },
+                        placeholder = { Text("Type the sentence above...") },
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = ImeAction.Default
+                        ),
+                        maxLines = 3,
+                        minLines = 2
+                    )
+                    
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onOpenTextField) { Text("Open Text Field") }
+                        OutlinedButton(
+                            onClick = {
+                                focusRequester.requestFocus()
+                                keyboardController?.show()
+                            }
+                        ) {
+                            Text("Show Keyboard")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                typingText = ""
+                            }
+                        ) {
+                            Text("Clear Text")
+                        }
                     }
                 }
                 else -> {
-                    // Treat any other stage as touch first when motion is disabled
-                    Text("Tap anywhere on the screen ~30 times at your normal pace.")
+                    // Default to touch calibration instructions when motion is disabled
+                    Text("Touch calibration must be done outside the app to capture natural behavior.")
                     Spacer(modifier = Modifier.height(8.dp))
                     Text("Progress: ${touch.first}/${touch.second}")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.primaryContainer)
-                            .pointerInput(Unit) {
-                                detectTapGestures {
-                                    val dwellMs = 150L
-                                    val now = System.currentTimeMillis()
-                                    val pSeed = (now % 17).toInt()
-                                    val sSeed = ((now / 3) % 19).toInt()
-                                    val pressure = (0.55 + 0.20 * ((pSeed % 11) / 10.0 - 0.5)).coerceIn(0.3, 0.9)
-                                    val size = (0.65 + 0.20 * ((sSeed % 9) / 8.0 - 0.5)).coerceIn(0.4, 0.95)
-                                    val dwellSec = (dwellMs.toDouble() / 1000.0).coerceIn(0.0, 2.0)
-                                    val velocity = (0.2 + (120.0 / dwellMs.coerceAtLeast(60).toDouble())).coerceIn(0.1, 1.0)
-                                    val curvature = 0.1
-                                    val pressureVar = (0.01 + 0.02 * ((pSeed % 7) / 6.0)).coerceIn(0.0, 0.1)
-                                    val sizeVar = (0.01 + 0.02 * ((sSeed % 5) / 4.0)).coerceIn(0.0, 0.1)
-                                    val distance = (velocity * dwellSec).coerceIn(0.0, 1.0)
-                                    val features = doubleArrayOf(
-                                        0.5, 0.5, pressure, size, dwellSec, velocity, curvature, pressureVar, sizeVar, distance
-                                    )
-                                    try {
-                                        val intent = android.content.Intent("com.example.odmas.TOUCH_DATA").setPackage(context.packageName)
-                                        intent.putExtra("features", features)
-                                        context.sendBroadcast(intent)
-                                    } catch (_: Exception) {}
-                                }
-                            },
-                        contentAlignment = Alignment.Center
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
                     ) {
-                        Text("Tap here to register touches", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.TouchApp,
+                                contentDescription = "Touch",
+                                modifier = Modifier.size(48.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "1. Minimize this app",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                "2. Swipe, scroll, and tap normally (varied movements)",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                "3. Return to this app when done",
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    // Minimize the app to background
+                                    val activity = context as? android.app.Activity
+                                    activity?.moveTaskToBack(true)
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            ) {
+                                Icon(Icons.Default.Home, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Minimize App")
+                            }
+                        }
                     }
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            Text("If nothing updates, ensure permissions are granted:", style = MaterialTheme.typography.labelSmall)
+            Text(
+                text = "Note: Accessibility Service must be enabled to capture typing patterns system-wide.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onOpenA11y) { Text("Enable Accessibility") }
                 OutlinedButton(onClick = onOpenUsageStats) { Text("Enable Usage Stats") }
             }
             Spacer(modifier = Modifier.height(8.dp))
+            
+            // Check if calibration is complete
+            val isComplete = (touch.first >= touch.second) && (typing.first >= typing.second)
+            
+            if (isComplete) {
+                Button(
+                    onClick = onCalibrationComplete,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Complete Calibration")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Close") }
         }
     }

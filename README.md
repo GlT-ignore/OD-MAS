@@ -66,20 +66,46 @@ The system uses two tiers of analysis:
 
 ## 📱 Features
 
+### Calibration Flow (POC Demo)
+The app now includes a comprehensive calibration and testing workflow:
+
+1. **Touch Calibration Phase**
+   - Collect 30 touch samples from normal UI interactions
+   - Minimize app and interact with system UI for real behavioral data
+   - Real-time progress tracking and guidance
+
+2. **Typing Calibration Phase** 
+   - Type 100 characters using provided sentences
+   - Inline text field with character counting
+   - Comprehensive typing rhythm analysis
+
+3. **Baseline Creation**
+   - Automatic model training after calibration completion
+   - Multi-tier agent preparation (Tier-0 stats, Tier-1 autoencoders)
+   - Chaquopy Python ML model baseline establishment
+
+4. **Test Mode**
+   - Real-time behavioral risk monitoring (0-100%)
+   - Live risk visualization with color-coded status
+   - "End Test" functionality to stop monitoring
+
 ### Real-time Monitoring
-- 3-second windows with 50% overlap
-- Continuous sensor data collection
-- Real-time risk assessment (0-100)
+- 3-second processing windows
+- Continuous sensor data collection via AccessibilityService
+- Real-time risk assessment with comprehensive logging
 
-### Smart Escalation
-- Escalate when fused risk crosses thresholds; biometric prompt can be triggered out-of-app via a high-priority notification action or automatically by the foreground service
-- De-escalation when behavior returns to baseline
-- Trust credits system to prevent nagging
+### Smart Escalation & Biometric Authentication
+- **Full-screen biometric prompts** triggered by policy thresholds
+- **Enhanced UI overlay** with semi-transparent background
+- **Risk-based messaging** (Critical, High, Medium, Low risk reasons)
+- **Proper session reset** - Risk resets to 0% after successful biometric verification
+- **Trust credits system** (3 credits) to prevent excessive prompting
 
-### Demo Mode
-- 2-minute baseline establishment
-- Guest simulation for testing
-- Live risk visualization
+### Comprehensive Debugging
+- **Detailed logging** throughout risk calculation pipeline
+- **Policy decision tracking** with escalation/de-escalation reasoning
+- **Biometric flow monitoring** with pre/post state comparisons
+- **Fusion algorithm visibility** showing Tier-0, Tier-1, and Chaquopy contributions
 
 ## 🚀 Getting Started
 
@@ -114,40 +140,94 @@ The app requires these permissions:
 
 ## 📊 Usage
 
-### Initial Setup
-1. Launch the app
-2. Grant required permissions when prompted
-3. Enable "Usage Access" in system settings
-4. The system will establish a baseline over 2 minutes
+### Step-by-Step Calibration Flow
 
-### Normal Operation
-- Use your device normally
-- The app runs in background monitoring behavior
-- Risk dial shows current security status
-- Biometric prompt appears when anomalies are detected. If out-of-app prompts are suppressed by OEM settings, tap the notification’s "Verify now" action.
+#### 1. Initial Setup
+1. **Launch the app** and grant required permissions when prompted
+2. **Enable permissions**:
+   - Touch/Accessibility Service access in system settings
+   - Usage Access permission
+   - Biometric authentication setup
+   - Notification permissions
 
-### Demo Mode
-1. Enable demo mode in settings
-2. Establish baseline (2 minutes)
-3. Hand device to another person
-4. Watch risk level increase
-5. Biometric verification will be triggered
+#### 2. Calibration Process
+1. **Start Calibration**: Tap "Start POC Demo" to begin the calibration flow
+
+2. **Touch Calibration Phase** (30 samples required):
+   - Read the instructions: "Minimize app and use normal UI"
+   - Tap "Minimize App" to switch to system UI
+   - **Interact normally** with your device - scroll, tap icons, navigate menus
+   - **Return to app** when you have 30+ touch samples
+   - Progress is tracked in real-time via AccessibilityService
+
+3. **Typing Calibration Phase** (100 characters required):
+   - Use the inline text field to type provided sentences
+   - **Type naturally** - don't try to type differently
+   - Character count updates in real-time: "Typed: X/100"
+   - Typing rhythm and dwell/flight times are analyzed
+
+4. **Baseline Creation** (automatic):
+   - Models are trained automatically after typing completion
+   - Tier-0 statistical baselines established
+   - Tier-1 autoencoder models prepared  
+   - Chaquopy Python ML baseline created
+   - Wait for "Baseline Ready" status
+
+5. **Test Mode** (manual start):
+   - Tap "Start Test" to begin behavioral monitoring
+   - **Use device normally** or hand to another person
+   - Watch the risk meter respond to behavioral changes
+   - Risk level updates every 3 seconds (0-100%)
+   - **Biometric prompt** appears when risk exceeds thresholds
+   - Tap "End Test" when finished
+
+#### 3. Understanding Risk Levels
+- **Green (0-59%)**: Normal behavior, low risk
+- **Yellow (60-74%)**: Slight behavioral anomaly  
+- **Orange (75-84%)**: High risk, approaching escalation
+- **Red (85-100%)**: Critical risk, biometric verification required
+
+#### 4. Biometric Authentication
+- **Automatic triggers** when risk crosses policy thresholds
+- **Full-screen overlay** with semi-transparent background
+- **Risk-appropriate messaging** explaining why verification is needed
+- **Success**: Risk resets to 0%, trust credits restored
+- **Failure/Cancel**: Prompt remains visible for retry
+
+### Production Operation
+- The calibrated system runs continuously in the background
+- **TouchAccessibilityService** monitors all touch interactions system-wide
+- **Real-time analysis** processes behavior every 3 seconds
+- **Intelligent escalation** prevents false positives with trust credits
+- **Privacy-first**: All processing happens on-device, no cloud connectivity
 
 ## 🔧 Technical Details
 
-### Fusion Algorithm (current)
+### Fusion Algorithm (Updated Implementation)
 ```
-Tier-0: p₀ = 1 - CDF_χ²(d², df)
-Tier-1: p₁ = Φ(z) where z = (e - μₑ)/σₑ
-Chaquopy: c = Python ML behavioral analysis
-Fusion: risk = 100 * (w₀*p₀ + w₁*p₁ + w₂*c)
-Weights adapt over session time; Tier‑1 gating runs periodically. Motion has been removed as a factor.
+Tier-0: Mahalanobis distance → normalized to [0,1] → averaged across modalities
+Tier-1: Autoencoder reconstruction error → probability via z-score normalization  
+Chaquopy: Python ML analysis (Isolation Forest, One-Class SVM) → risk percentage
+
+Fusion Strategy:
+- When Chaquopy confidence > 80%: 
+  sessionRisk = 0.5 * fusedRisk + 0.5 * chaquopyRisk
+- When Chaquopy confidence ≤ 80%:
+  sessionRisk = fusedRisk only
+
+fusedRisk = weight_tier0 * tier0Risk + weight_tier1 * tier1Risk
+Weights: Tier-0 = 0.2, Tier-1 = 0.8 (favoring deep learning analysis)
 ```
 
-### Policy Logic
-- **Escalation**: Risk threshold and hysteresis; service triggers full‑screen intent for biometrics
-- **De-escalation**: Risk recovers below threshold for a sustained period
-- **Trust credits**: 3 total
+### Policy Logic (Enhanced)
+- **Escalation Thresholds**:
+  - **Critical**: >85% → Immediate biometric prompt
+  - **High**: >75% for 5 consecutive windows → Biometric prompt
+  - **Trust Credits**: Depleted at 60-75% risk (yellow zone)
+- **De-escalation**: <60% risk for 10 consecutive windows
+- **Trust Credits**: 3 total, restore 1 every 30 seconds when risk <60%
+- **Session Reset**: Risk → 0% after successful biometric verification
+- **Comprehensive Logging**: All policy decisions tracked with detailed reasoning
 
 ### Performance
 - **TTE (Time-to-Escalation)**: < 90 seconds

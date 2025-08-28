@@ -45,14 +45,21 @@ class PolicyAgent {
     fun processSessionRisk(sessionRisk: Double): PolicyAction {
         val currentTime = System.currentTimeMillis()
         
+        android.util.Log.d("PolicyAgent", "=== PROCESSING SESSION RISK ===")
+        android.util.Log.d("PolicyAgent", "Input sessionRisk: $sessionRisk")
+        android.util.Log.d("PolicyAgent", "Current state - consecutiveHigh: $consecutiveHighRiskWindows, consecutiveLow: $consecutiveLowRiskWindows, trustCredits: $trustCredits, isEscalated: $isEscalated")
+        
         // Update trust credits
         updateTrustCredits(sessionRisk, currentTime)
+        android.util.Log.d("PolicyAgent", "After trust update - trustCredits: $trustCredits")
         
         // Determine escalation status
         val shouldEscalate = determineEscalation(sessionRisk)
+        android.util.Log.d("PolicyAgent", "Escalation decision: shouldEscalate=$shouldEscalate")
         
         // Update consecutive counters
         updateConsecutiveCounters(sessionRisk)
+        android.util.Log.d("PolicyAgent", "After counter update - consecutiveHigh: $consecutiveHighRiskWindows, consecutiveLow: $consecutiveLowRiskWindows")
         
         // Update policy state
         val newState = PolicyState(
@@ -66,17 +73,26 @@ class PolicyAgent {
         
         _policyState.value = newState
         
-        return when {
+        val action = when {
             shouldEscalate && !isEscalated -> {
                 isEscalated = true
+                android.util.Log.w("PolicyAgent", "🚨 ESCALATING! Risk=$sessionRisk, ConsecutiveHigh=$consecutiveHighRiskWindows")
                 PolicyAction.Escalate
             }
             !shouldEscalate && isEscalated -> {
                 isEscalated = false
+                android.util.Log.i("PolicyAgent", "✅ DE-ESCALATING! Risk=$sessionRisk, ConsecutiveLow=$consecutiveLowRiskWindows")
                 PolicyAction.DeEscalate
             }
-            else -> PolicyAction.Monitor
+            else -> {
+                android.util.Log.d("PolicyAgent", "📊 MONITORING - Risk=$sessionRisk, Level=${getRiskLevel(sessionRisk)}")
+                PolicyAction.Monitor
+            }
         }
+        
+        android.util.Log.d("PolicyAgent", "Final action: $action")
+        android.util.Log.d("PolicyAgent", "=== END POLICY PROCESSING ===")
+        return action
     }
     
     /**
@@ -85,13 +101,17 @@ class PolicyAgent {
     fun onBiometricSuccess(): Unit {
         isEscalated = false
         consecutiveHighRiskWindows = 0
+        consecutiveLowRiskWindows = 0
         trustCredits = MAX_TRUST_CREDITS
         lastTrustCreditRestoreTime = System.currentTimeMillis()
         
         _policyState.value = _policyState.value.copy(
+            sessionRisk = 0.0,
             isEscalated = false,
             trustCredits = trustCredits,
-            consecutiveHighRisk = 0
+            consecutiveHighRisk = 0,
+            consecutiveLowRisk = 0,
+            riskLevel = RiskLevel.LOW
         )
     }
     

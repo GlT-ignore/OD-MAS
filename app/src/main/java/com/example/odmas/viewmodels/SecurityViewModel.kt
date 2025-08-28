@@ -108,15 +108,15 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
                 // Handle policy actions
                 when (securityState.policyAction) {
                     PolicyAction.Escalate -> {
-                        Log.d(TAG, "Policy action: ESCALATE - showing biometric prompt")
+                        Log.w(TAG, "🚨 Policy action: ESCALATE - Risk=${securityState.sessionRisk}% - showing biometric prompt")
                         showBiometricPrompt()
                     }
                     PolicyAction.DeEscalate -> {
-                        Log.d(TAG, "Policy action: DE-ESCALATE - hiding biometric prompt")
+                        Log.i(TAG, "✅ Policy action: DE-ESCALATE - Risk=${securityState.sessionRisk}% - hiding biometric prompt")
                         hideBiometricPrompt()
                     }
                     PolicyAction.Monitor -> {
-                        Log.d(TAG, "Policy action: MONITOR - continuing monitoring")
+                        Log.d(TAG, "📊 Policy action: MONITOR - Risk=${securityState.sessionRisk}% - continuing monitoring")
                     }
                 }
             }
@@ -144,24 +144,48 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
      * Handle biometric verification success
      */
     fun onBiometricSuccess(): Unit {
+        Log.i(TAG, "🔐 BIOMETRIC SUCCESS RECEIVED - calling security manager")
+        val preState = _uiState.value.securityState
+        Log.d(TAG, "Pre-success state: risk=${preState.sessionRisk}, escalated=${preState.isEscalated}")
+        
         securityManager.onBiometricSuccess()
         hideBiometricPrompt()
+        
+        val postState = _uiState.value.securityState
+        Log.i(TAG, "🔐 Post-success state: risk=${postState.sessionRisk}, escalated=${postState.isEscalated}")
+        Log.i(TAG, "🔐 BIOMETRIC SUCCESS HANDLED COMPLETE")
     }
     
     /**
      * Handle biometric verification failure
      */
     fun onBiometricFailure(): Unit {
+        Log.w(TAG, "🔐 BIOMETRIC FAILURE RECEIVED - calling security manager")
+        val preState = _uiState.value.securityState
+        Log.d(TAG, "Pre-failure state: risk=${preState.sessionRisk}, escalated=${preState.isEscalated}")
+        
         securityManager.onBiometricFailure()
         // Keep prompt visible for retry
+        
+        val postState = _uiState.value.securityState
+        Log.w(TAG, "🔐 Post-failure state: risk=${postState.sessionRisk}, escalated=${postState.isEscalated}")
+        Log.w(TAG, "🔐 BIOMETRIC FAILURE HANDLED - PROMPT KEPT VISIBLE")
     }
     
     /**
      * Handle biometric verification cancellation
      */
     fun onBiometricCancelled(): Unit {
+        Log.w(TAG, "🔐 BIOMETRIC CANCELLED RECEIVED - calling security manager")
+        val preState = _uiState.value.securityState
+        Log.d(TAG, "Pre-cancel state: risk=${preState.sessionRisk}, escalated=${preState.isEscalated}")
+        
         securityManager.onBiometricFailure()
         hideBiometricPrompt()
+        
+        val postState = _uiState.value.securityState
+        Log.w(TAG, "🔐 Post-cancel state: risk=${postState.sessionRisk}, escalated=${postState.isEscalated}")
+        Log.w(TAG, "🔐 BIOMETRIC CANCELLED HANDLED COMPLETE")
     }
     
     /**
@@ -219,15 +243,55 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
         updateUIState()
     }
     
+    /**
+     * Start calibration flow - prepare system for calibration
+     */
+    fun startCalibrationFlow(): Unit {
+        Log.d(TAG, "Starting calibration flow...")
+        securityManager.reset() // Clear any existing data
+        securityManager.setCalibrationMode(true) // Prevent risk calculation during calibration
+        updateUIState()
+    }
+    
+    /**
+     * Complete calibration flow - build baseline and prepare for testing
+     */
+    fun completeCalibrationFlow(): Unit {
+        Log.d(TAG, "Completing calibration flow...")
+        securityManager.setCalibrationMode(false) // Enable risk calculation
+        updateUIState()
+    }
+    
+    /**
+     * Start test mode - begin risk monitoring
+     */
+    fun startTestMode(): Unit {
+        Log.d(TAG, "Starting test mode...")
+        securityManager.setTestMode(true)
+        updateUIState()
+    }
+    
+    /**
+     * Stop test mode
+     */
+    fun stopTestMode(): Unit {
+        Log.d(TAG, "Stopping test mode...")
+        securityManager.setTestMode(false)
+        updateUIState()
+    }
+    
     private fun showBiometricPrompt(): Unit {
         val currentState = _uiState.value
+        val reason = getBiometricReason(currentState.securityState.riskLevel)
+        Log.w(TAG, "🔐 SHOWING BIOMETRIC PROMPT - Reason: $reason, RiskLevel: ${currentState.securityState.riskLevel}")
         _biometricPromptState.value = BiometricPromptState(
             isVisible = true,
-            reason = getBiometricReason(currentState.securityState.riskLevel)
+            reason = reason
         )
     }
     
     private fun hideBiometricPrompt(): Unit {
+        Log.i(TAG, "🔐 HIDING BIOMETRIC PROMPT")
         _biometricPromptState.value = null
     }
     
