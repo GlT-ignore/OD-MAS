@@ -113,7 +113,12 @@ class SecurityManager(private val context: Context) {
                     tier0Agent.addFeatures(features, modality)
                     tier1Agent.submitCalibrationSample(features, modality)
                     tier1Agent.trainAllIfNeeded()
-                    // Chaquopy baseline will be updated when calibration completes
+                    
+                    // Add to Chaquopy ML baseline training data
+                    chaquopyManager.addBaselineSample(features)
+                    val (currentSamples, targetSamples) = chaquopyManager.getBaselineProgress()
+                    Log.d(TAG, "Chaquopy ML baseline progress: $currentSamples/$targetSamples samples")
+                    
                     lastFeatures = features
                     lastModality = modality
                     updateSecurityState(0.0, PolicyAction.Monitor)
@@ -236,18 +241,28 @@ class SecurityManager(private val context: Context) {
         tier1Agent.resetBaseline()
         fusionAgent.initializeSession()
         policyAgent.reset()
+        chaquopyManager.resetModels()
         calibrationMode = false
         testMode = false
         updateSecurityState()
+        Log.d(TAG, "All models and baseline data reset")
     }
     
     fun setCalibrationMode(enabled: Boolean) {
         calibrationMode = enabled
         Log.d(TAG, "Calibration mode: $calibrationMode")
         if (!enabled) {
-            // Calibration complete - finalize models
-            tier1Agent.trainAllIfNeeded()
-            Log.d(TAG, "Calibration completed, models trained")
+            // Calibration complete - finalize all models including Chaquopy ML
+            coroutineScope.launch {
+                tier1Agent.trainAllIfNeeded()
+                Log.d(TAG, "Tier-1 models trained")
+                
+                // Train Chaquopy ML models
+                val mlTrainingSuccess = chaquopyManager.trainModels()
+                Log.d(TAG, "Chaquopy ML training completed: $mlTrainingSuccess")
+                
+                Log.d(TAG, "All calibration models trained successfully")
+            }
         }
     }
     

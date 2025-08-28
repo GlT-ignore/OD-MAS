@@ -7,29 +7,30 @@ import com.chaquo.python.android.AndroidPlatform
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.sqrt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
- * Hybrid Behavioral Biometrics Manager
+ * Advanced Behavioral Biometrics Manager using Python ML
  * 
  * This class provides professional-grade behavioral biometrics analysis
- * using both Python ML libraries (via Chaquopy) and pure Kotlin statistical algorithms.
- * Python is used for advanced ML features, while Kotlin provides reliable fallback.
+ * using real Python ML libraries via Chaquopy integration.
+ * Features Isolation Forest and One-Class SVM algorithms.
  */
 class ChaquopyBehavioralManager private constructor(private val context: Context) {
     
-    // Python modules (for advanced ML features)
+    // Python environment
     private var pythonAvailable: Boolean = false
-    private var requests: com.chaquo.python.PyObject? = null
+    private var behavioralModule: com.chaquo.python.PyObject? = null
     
-    // ML models (hybrid implementation)
-    private var baselineData: List<List<Double>> = emptyList()
-    private var baselineMean: DoubleArray? = null
-    private var baselineStd: DoubleArray? = null
-    
-    // State management
+    // ML state management
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized: StateFlow<Boolean> = _isInitialized.asStateFlow()
+    
+    private val _isTraining = MutableStateFlow(false)
+    val isTraining: StateFlow<Boolean> = _isTraining.asStateFlow()
     
     private val _isAnalyzing = MutableStateFlow(false)
     val isAnalyzing: StateFlow<Boolean> = _isAnalyzing.asStateFlow()
@@ -37,8 +38,14 @@ class ChaquopyBehavioralManager private constructor(private val context: Context
     private val _lastAnalysisResult = MutableStateFlow<BehavioralAnalysisResult?>(null)
     val lastAnalysisResult: StateFlow<BehavioralAnalysisResult?> = _lastAnalysisResult.asStateFlow()
     
+    // Training data storage for baseline
+    private val baselineDataBuffer = mutableListOf<DoubleArray>()
+    private var isModelTrained = false
+    
     companion object {
-        private const val TAG = "KotlinBehavioralManager"
+        private const val TAG = "ChaquopyBehavioralManager"
+        private const val MIN_BASELINE_SAMPLES = 50
+        private const val MAX_BASELINE_SAMPLES = 200
         
         @Volatile
         private var INSTANCE: ChaquopyBehavioralManager? = null
@@ -51,620 +58,336 @@ class ChaquopyBehavioralManager private constructor(private val context: Context
     }
     
     /**
-     * Initialize hybrid behavioral analysis system
+     * Initialize Python ML environment
      */
-    suspend fun initialize(): Boolean {
-        return try {
-            Log.d(TAG, "Initializing hybrid behavioral analysis system...")
+    suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            Log.d(TAG, "Initializing Python ML behavioral analysis system...")
             
-            // Try to initialize Python for advanced features
+            // Initialize Python runtime
             pythonAvailable = initializePython()
             
-            // Initialize ML models (works with or without Python)
-            initializeModels()
+            if (pythonAvailable) {
+                // Import our custom behavioral ML module
+                val py = Python.getInstance()
+                behavioralModule = py.getModule("behavioral_ml")
+                
+                // Test ML module
+                val statusJson = behavioralModule!!.callAttr("get_model_status").toString()
+                Log.d(TAG, "ML module status: $statusJson")
+            }
             
-            _isInitialized.value = true
-            Log.d(TAG, "Hybrid behavioral analysis initialized successfully (Python: $pythonAvailable)")
-            true
+            _isInitialized.value = pythonAvailable
+            Log.d(TAG, "Python ML system initialized: $pythonAvailable")
+            pythonAvailable
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize hybrid behavioral analysis: ${e.message}")
+            Log.e(TAG, "Failed to initialize Python ML system: ${e.message}", e)
             _isInitialized.value = false
             false
         }
     }
     
     /**
-     * Initialize Python environment for advanced ML features
+     * Initialize Python environment
      */
     private fun initializePython(): Boolean {
         return try {
-            // Initialize Python if not already done
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(context))
             }
             
             val py = Python.getInstance()
             
-            // Import Python modules for advanced features
-            requests = py.getModule("requests")
+            // Test numpy availability (should be installed via pip)
+            try {
+                py.getModule("numpy")
+                Log.d(TAG, "NumPy available for ML computations")
+            } catch (e: Exception) {
+                Log.w(TAG, "NumPy not available, using pure Python implementations")
+            }
             
-            Log.d(TAG, "Python environment initialized successfully")
+            Log.d(TAG, "Python runtime initialized successfully")
             true
+            
         } catch (e: Exception) {
-            Log.w(TAG, "Python initialization failed, using Kotlin-only mode: ${e.message}")
+            Log.e(TAG, "Python initialization failed: ${e.message}", e)
             false
         }
     }
     
     /**
-     * Initialize ML models for behavioral analysis
+     * Add sample to baseline training data
      */
-    private fun initializeModels() {
-        try {
-            // Create baseline data for statistical analysis
-            baselineData = createBaselineData()
+    fun addBaselineSample(features: DoubleArray) {
+        if (isModelTrained) {
+            Log.d(TAG, "Model already trained, ignoring baseline sample")
+            return
+        }
+        
+        synchronized(baselineDataBuffer) {
+            baselineDataBuffer.add(features.clone())
+            Log.d(TAG, "Added baseline sample: ${baselineDataBuffer.size}/${MIN_BASELINE_SAMPLES}")
             
-            // Calculate baseline statistics
-            if (baselineData.isNotEmpty()) {
-                val numFeatures = baselineData[0].size
-                
-                baselineMean = DoubleArray(numFeatures)
-                baselineStd = DoubleArray(numFeatures)
-                
-                for (i in 0 until numFeatures) {
-                    val featureValues = baselineData.map { it[i] }
-                    baselineMean!![i] = featureValues.average()
-                    val mean = baselineMean!![i]
-                    baselineStd!![i] = sqrt(featureValues.map { (it - mean) * (it - mean) }.average())
-                }
+            // Limit buffer size
+            if (baselineDataBuffer.size > MAX_BASELINE_SAMPLES) {
+                baselineDataBuffer.removeAt(0)
+            }
+        }
+    }
+    
+    /**
+     * Train ML models on collected baseline data
+     */
+    suspend fun trainModels(): Boolean = withContext(Dispatchers.IO) {
+        if (!pythonAvailable || behavioralModule == null) {
+            Log.e(TAG, "Python ML not available for training")
+            return@withContext false
+        }
+        
+        if (isModelTrained) {
+            Log.d(TAG, "Models already trained")
+            return@withContext true
+        }
+        
+        synchronized(baselineDataBuffer) {
+            if (baselineDataBuffer.size < MIN_BASELINE_SAMPLES) {
+                Log.w(TAG, "Insufficient baseline data: ${baselineDataBuffer.size}/${MIN_BASELINE_SAMPLES}")
+                return@withContext false
+            }
+        }
+        
+        return@withContext try {
+            _isTraining.value = true
+            Log.d(TAG, "Training ML models on ${baselineDataBuffer.size} baseline samples...")
+            
+            // Convert baseline data to JSON
+            val baselineJson = convertBaselineToJson()
+            
+            // Train models via Python
+            val resultJson = behavioralModule!!.callAttr("train_baseline", baselineJson).toString()
+            val result = JSONObject(resultJson)
+            
+            val success = result.optBoolean("success", false)
+            if (success) {
+                isModelTrained = true
+                Log.d(TAG, "ML models trained successfully: ${result.optInt("models_trained", 0)} models")
+                Log.d(TAG, "Training data: ${result.optInt("n_samples", 0)} samples, ${result.optInt("n_features", 0)} features")
+            } else {
+                val error = result.optString("error", "Unknown error")
+                Log.e(TAG, "ML training failed: $error")
             }
             
-            Log.d(TAG, "ML models initialized successfully")
+            _isTraining.value = false
+            success
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize ML models: ${e.message}")
+            _isTraining.value = false
+            Log.e(TAG, "ML training error: ${e.message}", e)
+            false
         }
     }
     
     /**
-     * Start behavioral monitoring
+     * Analyze behavioral features using trained ML models
      */
-    fun startMonitoring() {
-        try {
-            Log.d(TAG, "Starting Kotlin behavioral monitoring...")
-            Log.d(TAG, "Kotlin behavioral monitoring started")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start Kotlin monitoring: ${e.message}")
+    suspend fun analyzeBehavior(features: DoubleArray): BehavioralAnalysisResult = withContext(Dispatchers.IO) {
+        if (!pythonAvailable || behavioralModule == null || !isModelTrained) {
+            Log.w(TAG, "ML analysis not available, returning fallback result")
+            return@withContext createFallbackResult(features)
         }
-    }
-    
-    /**
-     * Stop behavioral monitoring
-     */
-    fun stopMonitoring() {
-        try {
-            Log.d(TAG, "Stopping Kotlin behavioral monitoring...")
-            Log.d(TAG, "Kotlin behavioral monitoring stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to stop Kotlin monitoring: ${e.message}")
-        }
-    }
-    
-    /**
-     * Analyze current behavioral data using hybrid ML (Python + Kotlin)
-     */
-    suspend fun analyzeBehavior(features: DoubleArray): BehavioralAnalysisResult {
-        return try {
+        
+        return@withContext try {
             _isAnalyzing.value = true
-            Log.d(TAG, "Starting hybrid behavioral analysis...")
+            Log.d(TAG, "Analyzing behavioral features using ML models...")
             
-            // Perform statistical anomaly detection (Kotlin)
-            val anomalyScore = performStatisticalAnomalyDetection(features)
-            val noveltyScore = performStatisticalNoveltyDetection(features)
+            // Convert features to JSON
+            val featuresJson = JSONArray(features.toList()).toString()
             
-            // Use Python for advanced features if available
-            val advancedFeatures = if (pythonAvailable) {
-                performAdvancedPythonAnalysis(features)
+            // Analyze via Python ML
+            val resultJson = behavioralModule!!.callAttr("analyze_behavior", featuresJson).toString()
+            val result = JSONObject(resultJson)
+            
+            // Parse ML results
+            val riskScore = result.optDouble("risk_score", 50.0).toFloat()
+            val confidence = result.optDouble("confidence", 0.5).toFloat()
+            val isolationScore = result.optDouble("isolation_score", 0.5)
+            val svmScore = result.optDouble("svm_score", 0.5)
+            val statisticalScore = result.optDouble("statistical_score", 0.5)
+            val ensembleAgreement = result.optDouble("ensemble_agreement", 0.5)
+            
+            val isAnomalous = riskScore > 70.0f
+            
+            // Create detailed anomaly list
+            val anomalies = mutableListOf<String>()
+            if (isAnomalous) {
+                anomalies.add("ML Ensemble Detection: Risk ${String.format("%.1f", riskScore)}%")
+                anomalies.add("Isolation Forest: ${String.format("%.3f", isolationScore)} anomaly score")
+                anomalies.add("One-Class SVM: ${String.format("%.3f", svmScore)} distance score")
+                anomalies.add("Statistical Z-Score: ${String.format("%.3f", statisticalScore)} deviation")
+                anomalies.add("Model Agreement: ${String.format("%.1f", ensembleAgreement * 100)}%")
             } else {
-                mapOf("enhanced_confidence" to 0.8, "ml_insights" to "Using Kotlin-only mode")
+                anomalies.add("ML Ensemble: Normal behavioral pattern detected")
+                anomalies.add("All models agree on normal behavior")
             }
             
-            // Calculate risk score (0-100) with Python enhancement if available
-            val riskScore = if (pythonAvailable) {
-                calculateEnhancedRiskScore(anomalyScore, noveltyScore, advancedFeatures)
-            } else {
-                calculateRiskScore(anomalyScore, noveltyScore)
-            }
-            
-            // Calculate confidence based on feature quality
-            val confidence = calculateConfidence(features)
-            
-            // Detect anomalies
-            val isAnomalous = riskScore > 70.0
-            val anomalies = if (isAnomalous) {
-                listOf(
-                    "Behavioral pattern deviation detected",
-                    "Anomaly score: ${String.format("%.2f", anomalyScore)}",
-                    "Novelty score: ${String.format("%.2f", noveltyScore)}",
-                    if (pythonAvailable) "Enhanced analysis: ${advancedFeatures["ml_insights"]}" else "Kotlin-only analysis"
-                )
-            } else {
-                listOf("Normal behavioral pattern")
-            }
-            
-            val result = BehavioralAnalysisResult(
-                riskScore = riskScore.toFloat(),
-                confidence = confidence.toFloat(),
+            val analysisResult = BehavioralAnalysisResult(
+                riskScore = riskScore,
+                confidence = confidence,
                 isAnomalous = isAnomalous,
                 anomalies = anomalies,
                 touchDynamicsScore = calculateTouchScore(features),
-                motionAnalysisScore = calculateMotionScore(features),
-                typingPatternScore = calculateTypingScore(features),
-                timestamp = System.currentTimeMillis()
-            )
-            
-            _lastAnalysisResult.value = result
-            _isAnalyzing.value = false
-            
-            Log.d(TAG, "Hybrid analysis completed: Risk=${result.riskScore}%, Confidence=${result.confidence}%, Python: $pythonAvailable")
-            result
-        } catch (e: Exception) {
-            Log.e(TAG, "Hybrid analysis failed: ${e.message}")
-            _isAnalyzing.value = false
-            
-            BehavioralAnalysisResult(
-                riskScore = 0f,
-                confidence = 0f,
-                isAnomalous = false,
-                anomalies = listOf("Analysis failed: ${e.message}"),
-                touchDynamicsScore = 0f,
-                motionAnalysisScore = 0f,
-                typingPatternScore = 0f,
-                timestamp = System.currentTimeMillis()
-            )
-        }
-    }
-    
-    /**
-     * Perform advanced Python-based analysis (when Python is available)
-     */
-    private fun performAdvancedPythonAnalysis(features: DoubleArray): Map<String, Any> {
-        return try {
-            if (pythonAvailable && requests != null) {
-                // Example: Use Python for advanced data processing
-                val py = Python.getInstance()
-                
-                // Convert features to Python list properly
-                val pyBuiltins = py.getBuiltins()
-                val pyFeatures = pyBuiltins.callAttr("list")
-                
-                // Add each feature to the Python list
-                for (feature in features) {
-                    pyFeatures.callAttr("append", feature)
-                }
-                
-                // Simulate Python ML analysis
-                val featureMean = features.average()
-                val featureVariance = features.map { (it - featureMean) * (it - featureMean) }.average()
-                
-                // Python-enhanced confidence based on feature quality
-                val enhancedConfidence = when {
-                    featureVariance < 0.1 -> 0.95 // Very consistent features
-                    featureVariance < 0.5 -> 0.85 // Moderately consistent
-                    else -> 0.75 // Less consistent
-                }
-                
-                val mlInsights = "Python ML analysis: variance=${String.format("%.4f", featureVariance)}"
-                
-                mapOf(
-                    "enhanced_confidence" to enhancedConfidence,
-                    "ml_insights" to mlInsights,
-                    "feature_count" to features.size,
-                    "python_available" to true
+                typingRhythmScore = calculateTypingScore(features),
+                motionPatternsScore = 0.0f, // Motion disabled
+                overallBehaviorScore = riskScore / 100.0f,
+                mlModelDetails = mapOf(
+                    "isolation_forest_score" to isolationScore.toFloat(),
+                    "one_class_svm_score" to svmScore.toFloat(),
+                    "statistical_z_score" to statisticalScore.toFloat(),
+                    "ensemble_agreement" to ensembleAgreement.toFloat(),
+                    "confidence" to confidence,
+                    "algorithm" to "Isolation Forest + One-Class SVM + Statistical Analysis"
                 )
-            } else {
-                mapOf("enhanced_confidence" to 0.8, "ml_insights" to "Python not available")
-            }
+            )
+            
+            _lastAnalysisResult.value = analysisResult
+            _isAnalyzing.value = false
+            
+            Log.d(TAG, "ML Analysis complete: Risk=${riskScore}%, Confidence=${confidence}, Agreement=${ensembleAgreement}")
+            analysisResult
+            
         } catch (e: Exception) {
-            Log.w(TAG, "Python analysis failed, falling back to Kotlin: ${e.message}")
-            mapOf("enhanced_confidence" to 0.5, "ml_insights" to "Fallback to Kotlin analysis")
+            _isAnalyzing.value = false
+            Log.e(TAG, "ML analysis error: ${e.message}", e)
+            createFallbackResult(features)
         }
     }
     
     /**
-     * Calculate enhanced risk score using Python features
+     * Check if models are ready for analysis
      */
-    private fun calculateEnhancedRiskScore(anomalyScore: Double, noveltyScore: Double, advancedFeatures: Map<String, Any>): Double {
-        val baseScore = calculateRiskScore(anomalyScore, noveltyScore)
-        val enhancedConfidence = advancedFeatures["enhanced_confidence"] as? Double ?: 0.8
+    fun isModelReady(): Boolean {
+        return pythonAvailable && isModelTrained
+    }
+    
+    /**
+     * Get baseline training progress
+     */
+    fun getBaselineProgress(): Pair<Int, Int> {
+        synchronized(baselineDataBuffer) {
+            return Pair(baselineDataBuffer.size, MIN_BASELINE_SAMPLES)
+        }
+    }
+    
+    /**
+     * Reset all models and baseline data
+     */
+    fun resetModels() {
+        Log.d(TAG, "Resetting ML models and baseline data")
+        synchronized(baselineDataBuffer) {
+            baselineDataBuffer.clear()
+        }
+        isModelTrained = false
+    }
+    
+    /**
+     * Start monitoring mode (continuous baseline collection)
+     */
+    fun startMonitoring() {
+        Log.d(TAG, "Started ML behavioral monitoring")
+    }
+    
+    /**
+     * Stop monitoring mode
+     */
+    fun stopMonitoring() {
+        Log.d(TAG, "Stopped ML behavioral monitoring")
+    }
+    
+    private fun convertBaselineToJson(): String {
+        val jsonArray = JSONArray()
+        synchronized(baselineDataBuffer) {
+            for (sample in baselineDataBuffer) {
+                val sampleArray = JSONArray()
+                for (feature in sample) {
+                    sampleArray.put(feature)
+                }
+                jsonArray.put(sampleArray)
+            }
+        }
+        return jsonArray.toString()
+    }
+    
+    private fun createFallbackResult(features: DoubleArray): BehavioralAnalysisResult {
+        // Simple statistical fallback when ML is not available
+        val variance = if (features.isNotEmpty()) {
+            val mean = features.average()
+            features.map { (it - mean) * (it - mean) }.average()
+        } else {
+            0.5
+        }
         
-        // Enhance score with Python insights
-        return baseScore * enhancedConfidence
+        val riskScore = (variance * 50.0 + 25.0).toFloat().coerceIn(0.0f, 100.0f)
+        val confidence = 0.4f // Lower confidence without ML
+        
+        return BehavioralAnalysisResult(
+            riskScore = riskScore,
+            confidence = confidence,
+            isAnomalous = riskScore > 70.0f,
+            anomalies = listOf("Fallback statistical analysis (ML unavailable)"),
+            touchDynamicsScore = calculateTouchScore(features),
+            typingRhythmScore = calculateTypingScore(features),
+            motionPatternsScore = 0.0f,
+            overallBehaviorScore = riskScore / 100.0f,
+            mlModelDetails = mapOf(
+                "algorithm" to "Statistical Fallback",
+                "ml_available" to false
+            )
+        )
     }
     
-    /**
-     * Perform statistical anomaly detection using Z-score
-     */
-    private fun performStatisticalAnomalyDetection(features: DoubleArray): Double {
-        return try {
-            val meanArray = baselineMean
-            val stdArray = baselineStd
-            if (meanArray != null && stdArray != null) {
-                var totalZScore = 0.0
-                var featureCount = 0
-                
-                for (i in features.indices) {
-                    if (i < meanArray.size && stdArray[i] > 0) {
-                        val zScore = kotlin.math.abs((features[i] - meanArray[i]) / stdArray[i])
-                        totalZScore += zScore
-                        featureCount++
-                    }
-                }
-                
-                val avgZScore = if (featureCount > 0) totalZScore / featureCount else 0.0
-                
-                // Convert Z-score to anomaly probability (0-1)
-                val anomalyScore = 1.0 - (1.0 / (1.0 + avgZScore))
-                anomalyScore.coerceIn(0.0, 1.0)
-            } else {
-                0.5 // Default score
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Statistical anomaly detection failed: ${e.message}")
-            0.5
-        }
-    }
-    
-    /**
-     * Perform statistical novelty detection using Mahalanobis distance
-     */
-    private fun performStatisticalNoveltyDetection(features: DoubleArray): Double {
-        return try {
-            val meanArray = baselineMean
-            val stdArray = baselineStd
-            if (meanArray != null && stdArray != null) {
-                var totalDistance = 0.0
-                var featureCount = 0
-                
-                for (i in features.indices) {
-                    if (i < meanArray.size && stdArray[i] > 0) {
-                        val normalizedDistance = (features[i] - meanArray[i]) / stdArray[i]
-                        totalDistance += normalizedDistance * normalizedDistance
-                        featureCount++
-                    }
-                }
-                
-                val avgDistance = if (featureCount > 0) totalDistance / featureCount else 0.0
-                
-                // Convert distance to novelty probability (0-1)
-                val noveltyScore = 1.0 - (1.0 / (1.0 + avgDistance))
-                noveltyScore.coerceIn(0.0, 1.0)
-            } else {
-                0.5 // Default score
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Statistical novelty detection failed: ${e.message}")
-            0.5
-        }
-    }
-    
-    /**
-     * Create synthetic baseline data for ML models
-     */
-    private fun createBaselineData(): List<List<Double>> {
-        return try {
-            // Create synthetic baseline features (normal behavior patterns)
-            val baselineFeatures = mutableListOf<List<Double>>()
-            
-            for (i in 0 until 100) {
-                val features = listOf(
-                    Math.random() * 0.5 + 0.5, // Touch pressure (0.5-1.0)
-                    Math.random() * 200 + 100,  // Touch velocity (100-300)
-                    Math.random() * 0.3 + 0.7,  // Motion stability (0.7-1.0)
-                    Math.random() * 50 + 150,    // Typing speed (150-200)
-                    Math.random() * 0.2 + 0.8   // Pattern consistency (0.8-1.0)
-                )
-                baselineFeatures.add(features)
-            }
-            
-            baselineFeatures
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create baseline data: ${e.message}")
-            emptyList()
-        }
-    }
-    
-    /**
-     * Calculate risk score from anomaly and novelty scores
-     */
-    private fun calculateRiskScore(anomalyScore: Double, noveltyScore: Double): Double {
-        // Combine anomaly and novelty scores
-        val combinedScore = (anomalyScore * 0.6 + noveltyScore * 0.4)
-        return combinedScore * 100.0 // Convert to percentage
-    }
-    
-    /**
-     * Calculate confidence based on feature quality
-     */
-    private fun calculateConfidence(features: DoubleArray): Double {
-        return try {
-            if (features.isNotEmpty()) {
-                // Calculate feature variance as confidence indicator
-                val mean = features.average()
-                val variance = features.map { (it - mean) * (it - mean) }.average()
-                val confidence = 1.0 - (variance * 0.1) // Lower variance = higher confidence
-                confidence.coerceIn(0.5, 1.0) * 100.0
-            } else {
-                80.0 // Default confidence
-            }
-        } catch (e: Exception) {
-            80.0 // Default confidence
-        }
-    }
-    
-    /**
-     * Calculate touch dynamics score
-     */
     private fun calculateTouchScore(features: DoubleArray): Float {
-        return try {
-            if (features.isNotEmpty()) {
-                val touchFeatures = features.take(2) // First 2 features are touch-related
-                val avgTouchScore = touchFeatures.average()
-                (avgTouchScore * 100).toFloat()
-            } else {
-                75.0f
-            }
-        } catch (e: Exception) {
-            75.0f
+        // Touch-specific scoring (assuming first half of features are touch-related)
+        if (features.size < 4) return 0.5f
+        
+        val touchFeatures = features.take(features.size / 2)
+        val touchVariance = if (touchFeatures.isNotEmpty()) {
+            val mean = touchFeatures.average()
+            touchFeatures.map { (it - mean) * (it - mean) }.average()
+        } else {
+            0.5
         }
+        
+        return (touchVariance * 0.8 + 0.1).toFloat().coerceIn(0.0f, 1.0f)
     }
     
-    /**
-     * Calculate motion analysis score
-     */
-    private fun calculateMotionScore(features: DoubleArray): Float {
-        return try {
-            if (features.size >= 3) {
-                val motionFeature = features[2] // 3rd feature is motion-related
-                (motionFeature * 100).toFloat()
-            } else {
-                80.0f
-            }
-        } catch (e: Exception) {
-            80.0f
-        }
-    }
-    
-    /**
-     * Calculate typing pattern score
-     */
     private fun calculateTypingScore(features: DoubleArray): Float {
-        return try {
-            if (features.size >= 4) {
-                val typingFeature = features[3] // 4th feature is typing-related
-                (typingFeature * 100).toFloat()
-            } else {
-                85.0f
-            }
-        } catch (e: Exception) {
-            85.0f
+        // Typing-specific scoring (assuming second half of features are typing-related)
+        if (features.size < 4) return 0.5f
+        
+        val typingFeatures = features.drop(features.size / 2)
+        val typingVariance = if (typingFeatures.isNotEmpty()) {
+            val mean = typingFeatures.average()
+            typingFeatures.map { (it - mean) * (it - mean) }.average()
+        } else {
+            0.5
         }
-    }
-    
-    /**
-     * Get behavioral baseline
-     */
-    suspend fun getBaseline(): BehavioralBaseline {
-        return try {
-            Log.d(TAG, "Getting Kotlin behavioral baseline...")
-            
-            BehavioralBaseline(
-                touchDynamicsBaseline = mapOf(
-                    "pressure_mean" to 0.75f,
-                    "pressure_std" to 0.15f,
-                    "velocity_mean" to 200f,
-                    "velocity_std" to 50f,
-                    "dwell_time_mean" to 180f,
-                    "dwell_time_std" to 40f
-                ),
-                motionBaseline = mapOf(
-                    "acceleration_mean" to 9.8f,
-                    "acceleration_std" to 0.3f,
-                    "tremor_level_mean" to 0.02f,
-                    "tremor_level_std" to 0.01f
-                ),
-                typingBaseline = mapOf(
-                    "key_press_mean" to 120f,
-                    "key_press_std" to 25f,
-                    "flight_time_mean" to 200f,
-                    "flight_time_std" to 50f,
-                    "typing_speed_mean" to 45f,
-                    "typing_speed_std" to 8f
-                ),
-                timestamp = System.currentTimeMillis()
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get Kotlin baseline: ${e.message}")
-            BehavioralBaseline(
-                touchDynamicsBaseline = emptyMap(),
-                motionBaseline = emptyMap(),
-                typingBaseline = emptyMap(),
-                timestamp = System.currentTimeMillis()
-            )
-        }
-    }
-    
-    /**
-     * Update behavioral baseline
-     */
-    suspend fun updateBaseline(duration: Long = 120000L): Boolean {
-        return try {
-            Log.d(TAG, "Updating Kotlin behavioral baseline...")
-            
-            // Simulate baseline update
-            kotlinx.coroutines.delay(duration)
-            
-            // Retrain models with new baseline data
-            baselineData = createBaselineData()
-            if (baselineData.isNotEmpty()) {
-                val numFeatures = baselineData[0].size
-                
-                baselineMean = DoubleArray(numFeatures)
-                baselineStd = DoubleArray(numFeatures)
-                
-                for (i in 0 until numFeatures) {
-                    val featureValues = baselineData.map { it[i] }
-                    baselineMean!![i] = featureValues.average()
-                    val mean = baselineMean!![i]
-                    baselineStd!![i] = sqrt(featureValues.map { (it - mean) * (it - mean) }.average())
-                }
-            }
-            
-            Log.d(TAG, "Kotlin behavioral baseline updated successfully")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to update Kotlin baseline: ${e.message}")
-            false
-        }
-    }
-    
-    /**
-     * Get detailed behavioral insights
-     */
-    fun getBehavioralInsights(): BehavioralInsights {
-        return try {
-            BehavioralInsights(
-                overallBehavioralScore = 85.0f,
-                touchDynamicsInsights = listOf(
-                    "Consistent pressure patterns detected",
-                    "Stable touch velocity maintained",
-                    "Regular dwell times observed"
-                ),
-                motionInsights = listOf(
-                    "Normal tremor levels",
-                    "Consistent orientation patterns",
-                    "Expected acceleration ranges"
-                ),
-                typingInsights = listOf(
-                    "Typical key press durations",
-                    "Consistent flight times",
-                    "Normal typing speed patterns"
-                ),
-                recommendations = listOf(
-                    "Continue normal usage patterns",
-                    "Behavioral baseline is stable",
-                    "ML models performing well"
-                )
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get Kotlin insights: ${e.message}")
-            BehavioralInsights(
-                overallBehavioralScore = 0f,
-                touchDynamicsInsights = emptyList(),
-                motionInsights = emptyList(),
-                typingInsights = emptyList(),
-                recommendations = listOf("Unable to analyze behavior")
-            )
-        }
-    }
-    
-    /**
-     * Add a new Python agent for advanced ML capabilities
-     * This method allows you to easily extend the system with new Python-based agents
-     */
-    fun addPythonAgent(agentName: String, agentModule: String, agentFunction: String): Boolean {
-        return try {
-            if (!pythonAvailable) {
-                Log.w(TAG, "Cannot add Python agent: Python not available")
-                return false
-            }
-            
-            val py = Python.getInstance()
-            
-            // Import the agent module
-            val agentModuleObj = py.getModule(agentModule)
-            
-            // Store the agent for later use
-            Log.d(TAG, "Python agent '$agentName' added successfully")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add Python agent '$agentName': ${e.message}")
-            false
-        }
-    }
-    
-    /**
-     * Execute a Python agent function
-     */
-    fun executePythonAgent(agentName: String, functionName: String, parameters: Map<String, Any>): Any? {
-        return try {
-            if (!pythonAvailable) {
-                Log.w(TAG, "Cannot execute Python agent: Python not available")
-                return null
-            }
-            
-            val py = Python.getInstance()
-            
-            // Example: Execute agent function
-            Log.d(TAG, "Executing Python agent '$agentName.$functionName'")
-            
-            // Return result (placeholder)
-            "Python agent execution completed"
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to execute Python agent '$agentName.$functionName': ${e.message}")
-            null
-        }
-    }
-    
-    /**
-     * Check if Python is available for advanced features
-     */
-    fun isPythonAvailable(): Boolean {
-        return pythonAvailable
-    }
-    
-    /**
-     * Clean up resources
-     */
-    fun cleanup() {
-        try {
-            Log.d(TAG, "Cleaning up hybrid resources...")
-            
-            _isInitialized.value = false
-            _isAnalyzing.value = false
-            _lastAnalysisResult.value = null
-            
-            Log.d(TAG, "Hybrid resources cleaned up successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to cleanup hybrid resources: ${e.message}")
-        }
+        
+        return (typingVariance * 0.8 + 0.1).toFloat().coerceIn(0.0f, 1.0f)
     }
 }
 
 /**
- * Data classes for behavioral analysis
+ * Enhanced Behavioral Analysis Result with ML details
  */
 data class BehavioralAnalysisResult(
-    val riskScore: Float, // 0-100%
-    val confidence: Float, // 0-100%
+    val riskScore: Float,
+    val confidence: Float,
     val isAnomalous: Boolean,
     val anomalies: List<String>,
     val touchDynamicsScore: Float,
-    val motionAnalysisScore: Float,
-    val typingPatternScore: Float,
-    val timestamp: Long
-)
-
-data class BehavioralBaseline(
-    val touchDynamicsBaseline: Map<String, Float>,
-    val motionBaseline: Map<String, Float>,
-    val typingBaseline: Map<String, Float>,
-    val timestamp: Long
-)
-
-data class BehavioralInsights(
-    val overallBehavioralScore: Float,
-    val touchDynamicsInsights: List<String>,
-    val motionInsights: List<String>,
-    val typingInsights: List<String>,
-    val recommendations: List<String>
+    val typingRhythmScore: Float,
+    val motionPatternsScore: Float,
+    val overallBehaviorScore: Float,
+    val mlModelDetails: Map<String, Any> = emptyMap()
 )
