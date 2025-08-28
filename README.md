@@ -6,13 +6,13 @@ A privacy-first Android app that uses behavioral biometrics to detect when someo
 
 OD-MAS implements a multi-agent security system that continuously monitors user behavior through:
 - **Touch dynamics** (pressure, velocity, curvature)
-- **Motion sensors** (accelerometer, gyroscope)
+- ~~Motion sensors (accelerometer, gyroscope)~~
 - **Typing rhythm** (dwell/flight times)
 - **App usage patterns**
 
 The system uses two tiers of analysis:
-- **Tier-0**: Fast statistical analysis using Mahalanobis distance
-- **Tier-1**: Deep learning analysis using autoencoder reconstruction error
+- **Tier-0**: Fast statistical analysis using Mahalanobis distance (Touch, Typing only)
+- **Tier-1**: Behavioral scoring models per modality (Touch, Typing)
 
 ## 🔒 Privacy Features
 
@@ -72,8 +72,8 @@ The system uses two tiers of analysis:
 - Real-time risk assessment (0-100)
 
 ### Smart Escalation
-- Escalate when risk > 75 for 5 consecutive windows OR > 85 once
-- De-escalate when risk < 60 for 10 consecutive windows
+- Escalate when fused risk crosses thresholds; biometric prompt can be triggered out-of-app via a high-priority notification action or automatically by the foreground service
+- De-escalation when behavior returns to baseline
 - Trust credits system to prevent nagging
 
 ### Demo Mode
@@ -106,10 +106,11 @@ cd odmas
 ### Permissions
 
 The app requires these permissions:
-- `HIGH_SAMPLING_RATE_SENSORS`: For motion detection
 - `PACKAGE_USAGE_STATS`: For app usage monitoring (special access)
-- `USE_BIOMETRIC`: For biometric verification
+- `USE_BIOMETRIC` / `BIOMETRIC_WEAK`: For biometric verification
 - `FOREGROUND_SERVICE`: For continuous monitoring
+- `POST_NOTIFICATIONS`: For heads-up verify action
+- `SYSTEM_ALERT_WINDOW`: To keep accessibility overlay sticky
 
 ## 📊 Usage
 
@@ -123,7 +124,7 @@ The app requires these permissions:
 - Use your device normally
 - The app runs in background monitoring behavior
 - Risk dial shows current security status
-- Biometric prompt appears only when anomalies detected
+- Biometric prompt appears when anomalies are detected. If out-of-app prompts are suppressed by OEM settings, tap the notification’s "Verify now" action.
 
 ### Demo Mode
 1. Enable demo mode in settings
@@ -134,20 +135,19 @@ The app requires these permissions:
 
 ## 🔧 Technical Details
 
-### Fusion Algorithm
+### Fusion Algorithm (current)
 ```
 Tier-0: p₀ = 1 - CDF_χ²(d², df)
 Tier-1: p₁ = Φ(z) where z = (e - μₑ)/σₑ
 Chaquopy: c = Python ML behavioral analysis
 Fusion: risk = 100 * (w₀*p₀ + w₁*p₁ + w₂*c)
-Weights: w₀ = 0.3, w₁ = 0.2, w₂ = 0.5 (when Chaquopy confidence > 80%)
-Fallback: w₀ = 0.7, w₁ = 0.3 (when Chaquopy not available)
+Weights adapt over session time; Tier‑1 gating runs periodically. Motion has been removed as a factor.
 ```
 
 ### Policy Logic
-- **Escalation**: Risk > 75 for 5 windows OR > 85 once
-- **De-escalation**: Risk < 60 for 10 windows
-- **Trust credits**: 3 total, decrement on yellow zone, restore every 30s
+- **Escalation**: Risk threshold and hysteresis; service triggers full‑screen intent for biometrics
+- **De-escalation**: Risk recovers below threshold for a sustained period
+- **Trust credits**: 3 total
 
 ### Performance
 - **TTE (Time-to-Escalation)**: < 90 seconds
@@ -215,6 +215,10 @@ The app integrates with **Chaquopy** for Python-based behavioral biometrics anal
 - **pandas**: Data processing and analysis
 - **scipy**: Statistical analysis and signal processing
 - User-controlled data deletion
+
+## 🗂 Branches / Reference App
+
+- The `OD-MAS-modifications` directory in this repo is a reference snapshot used during integration. It is ignored by git and not part of the build. The current codebase reflects those mechanics integrated into the main app.
 
 ## 🤝 Contributing
 

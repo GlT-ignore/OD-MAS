@@ -2,10 +2,20 @@ package com.example.odmas.core.services
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.PixelFormat
 import android.util.Log
-import android.view.accessibility.AccessibilityEvent
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityEvent
+import android.widget.FrameLayout
+import android.widget.TextView
+import com.example.odmas.MainActivity
 import com.example.odmas.core.sensors.TouchSensorCollector
 
 /**
@@ -22,6 +32,17 @@ class TouchAccessibilityService : AccessibilityService() {
     private var lastKeyDownTime: Long = 0L
     private var lastKeyUpTime: Long = 0L
     private var lastKeyCode: Int = -1
+    // Soft keyboard text-change tracking
+    private var lastTextChangeTimeMs: Long = 0L
+    private var lastTextLength: Int = 0
+
+    // Escalation overlay control
+    private var overlayReceiver: BroadcastReceiver? = null
+    private var windowManager: WindowManager? = null
+    private var overlayView: View? = null
+
+    // Accessibility-based touch timing
+    private var a11yTouchStartMs: Long = 0L
     
     companion object {
         private const val TAG = "TouchAccessibilityService"
@@ -38,7 +59,9 @@ class TouchAccessibilityService : AccessibilityService() {
                         AccessibilityEvent.TYPE_TOUCH_INTERACTION_START or
                         AccessibilityEvent.TYPE_TOUCH_INTERACTION_END or
                         AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
-                        AccessibilityEvent.TYPE_VIEW_FOCUSED
+                        AccessibilityEvent.TYPE_VIEW_FOCUSED or
+                        AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                        AccessibilityEvent.TYPE_VIEW_SELECTED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
@@ -50,6 +73,36 @@ class TouchAccessibilityService : AccessibilityService() {
         
         // Initialize touch collector
         touchCollector = TouchSensorCollector()
+
+        // Prepare WindowManager for accessibility overlay
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        // Register overlay control receiver (show/hide overlay)
+        if (overlayReceiver == null) {
+            overlayReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    when (intent?.action) {
+                        "com.example.odmas.SHOW_OVERLAY" -> showVerificationOverlay()
+                        "com.example.odmas.HIDE_OVERLAY" -> hideVerificationOverlay()
+                    }
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction("com.example.odmas.SHOW_OVERLAY")
+                addAction("com.example.odmas.HIDE_OVERLAY")
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(
+                    overlayReceiver,
+                    filter,
+                    /* broadcastPermission */ null,
+                    /* scheduler */ null,
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                registerReceiver(overlayReceiver, filter)
+            }
+        }
     }
     
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -67,9 +120,15 @@ class TouchAccessibilityService : AccessibilityService() {
                     }
                     AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> {
                         Log.d(TAG, "Touch interaction started")
+                        a11yTouchStartMs = System.currentTimeMillis()
                     }
                     AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> {
-                        Log.d(TAG, "Touch interaction ended")
+                        val end = System.currentTimeMillis()
+                        val dwellMs = (end - a11yTouchStartMs).coerceAtLeast(50L).coerceAtMost(2000L)
+                        Log.d(TAG, "Touch interaction ended dwell=${dwellMs}ms (a11y)")
+                        val features = buildA11yTouchFeatures(dwellMs)
+                        sendTouchDataToSecurityManager(features)
+                        a11yTouchStartMs = 0L
                     }
                     AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                         Log.d(TAG, "Text input detected")
@@ -117,7 +176,8 @@ class TouchAccessibilityService : AccessibilityService() {
                         Log.d(TAG, "Key up: ${event.keyCode}, dwell: ${dwellTime}ms, flight: ${flightTime}ms")
                         
                         // Create typing features and send to security manager
-                        sendTypingDataToSecurityManager(dwellTime, flightTime)
+                        val isSpace = (event.keyCode == KeyEvent.KEYCODE_SPACE)
+                        sendTypingDataToSecurityManager(dwellTime, flightTime, isSpace)
                         
                         lastKeyUpTime = currentTime
                     }
@@ -135,65 +195,78 @@ class TouchAccessibilityService : AccessibilityService() {
     }
     
     private fun processTouchEvent(event: AccessibilityEvent) {
-        // Extract touch information and send to security manager
-        // This is a simplified version - in a real implementation you'd extract
-        // more detailed touch data from the accessibility event
-        
-        val touchFeatures = doubleArrayOf(
-            System.currentTimeMillis().toDouble() % 1000 / 1000.0, // Time-based feature
-            (event.source?.hashCode() ?: 0).toDouble() % 100 / 100.0, // Source-based feature
-            (event.eventTime % 1000).toDouble() / 1000.0, // Event time feature
-            (event.packageName?.hashCode() ?: 0).toDouble() % 100 / 100.0, // Package feature
-            Math.random(), // Random feature for demo
-            Math.random(),
-            Math.random(),
-            Math.random(),
-            Math.random(),
-            Math.random()
-        )
-        
-        // Send to security manager via broadcast or shared state
-        sendTouchDataToSecurityManager(touchFeatures)
+        // Use a11y-derived dwell estimate when possible
+        val now = System.currentTimeMillis()
+        val dwellMs: Long = if (a11yTouchStartMs > 0L) {
+            (now - a11yTouchStartMs).coerceAtLeast(50L).coerceAtMost(2000L)
+        } else {
+            150L
+        }
+        val features = buildA11yTouchFeatures(dwellMs)
+        sendTouchDataToSecurityManager(features)
     }
     
     private fun processTypingEvent(event: AccessibilityEvent) {
-        // Extract typing pattern information from text change events
-        val textLength = event.text?.toString()?.length ?: 0
-        val currentTime = System.currentTimeMillis()
-        
-        // Estimate typing speed based on text changes
-        val typingFeatures = doubleArrayOf(
-            textLength.toDouble() / 10.0, // Text length normalized
-            (currentTime % 10000).toDouble() / 10000.0, // Time-based feature
-            Math.random(), // Simulated timing variance
-            Math.random(), // Simulated rhythm pattern
-            Math.random(), // Additional pattern features
-            Math.random(),
-            Math.random(),
-            Math.random(),
-            Math.random(),
-            Math.random()
-        )
-        
-        sendTypingDataToSecurityManager(0L, 0L) // Placeholder for now
+        // Robust typing inference from a11y text changes when KeyEvents are not delivered
+        val now: Long = System.currentTimeMillis()
+        var added: Int = event.addedCount
+        var removed: Int = event.removedCount
+
+        // Snapshot length as fallback
+        var snapshotLen: Int = lastTextLength
+        try {
+            val parts = event.text
+            if (parts != null && parts.isNotEmpty()) {
+                snapshotLen = parts[0].toString().length
+            }
+        } catch (_: Exception) {}
+
+        if (added == 0 && removed == 0) {
+            val delta = snapshotLen - lastTextLength
+            if (delta > 0) added = delta else if (delta < 0) removed = -delta
+        }
+
+        val dwellMs: Long = 80L
+        val flightMs: Long = if (lastTextChangeTimeMs > 0) now - lastTextChangeTimeMs else 0L
+
+        if (added > 0) {
+            var lastChar: Char? = null
+            try {
+                val parts = event.text
+                if (parts != null && parts.isNotEmpty()) {
+                    val s = parts[0].toString()
+                    if (s.isNotEmpty()) lastChar = s.last()
+                }
+            } catch (_: Exception) {}
+
+            repeat(added) {
+                val isSpace: Boolean = (lastChar == ' ')
+                Log.d(TAG, "Typing via A11y: added=1 dwell=${dwellMs}ms flight=${flightMs}ms isSpace=$isSpace")
+                sendTypingDataToSecurityManager(dwellMs, flightMs, isSpace)
+            }
+            lastTextLength = (lastTextLength + added)
+        } else if (removed > 0) {
+            lastTextLength = (lastTextLength - removed).coerceAtLeast(0)
+        }
+
+        lastTextChangeTimeMs = now
     }
     
     private fun sendTouchDataToSecurityManager(features: DoubleArray) {
         // Send touch data to the security manager
         Log.d(TAG, "Sending touch features to security manager: ${features.contentToString()}")
-        
-        val intent = Intent("com.example.odmas.TOUCH_DATA")
+        val intent = Intent("com.example.odmas.TOUCH_DATA").setPackage(packageName)
         intent.putExtra("features", features)
         sendBroadcast(intent)
     }
-    
-    private fun sendTypingDataToSecurityManager(dwellTime: Long, flightTime: Long) {
+
+    private fun sendTypingDataToSecurityManager(dwellTime: Long, flightTime: Long, isSpace: Boolean) {
         // Send typing pattern data to the security manager
-        Log.d(TAG, "Sending typing data: dwell=${dwellTime}ms, flight=${flightTime}ms")
-        
-        val intent = Intent("com.example.odmas.TYPING_DATA")
+        Log.d(TAG, "Sending typing data: dwell=${dwellTime}ms, flight=${flightTime}ms, isSpace=$isSpace")
+        val intent = Intent("com.example.odmas.TYPING_DATA").setPackage(packageName)
         intent.putExtra("dwellTime", dwellTime)
         intent.putExtra("flightTime", flightTime)
+        intent.putExtra("isSpace", isSpace)
         sendBroadcast(intent)
     }
     
@@ -201,28 +274,89 @@ class TouchAccessibilityService : AccessibilityService() {
      * Generate touch event when system interactions are detected
      */
     private fun generateSystemTouchEvent() {
-        val currentTime = System.currentTimeMillis()
-        
-        // Create synthetic touch features for system interactions
-        val systemTouchFeatures = doubleArrayOf(
-            Math.random(), // Normalized x coordinate
-            Math.random(), // Normalized y coordinate
-            0.5, // Average pressure
-            0.8, // Average size
-            (currentTime % 1000).toDouble() / 1000.0, // Time-based dwell
-            Math.random() * 2.0, // Velocity
-            0.1, // Low curvature for system taps
-            0.1, // Low pressure variance
-            0.1, // Low size variance
-            1.0  // Distance (normalized)
-        )
-        
-        Log.d(TAG, "Generated system touch event")
-        sendTouchDataToSecurityManager(systemTouchFeatures)
+        val dwellMs = 150L
+        val features = buildA11yTouchFeatures(dwellMs)
+        Log.d(TAG, "Generated system touch event (fallback)")
+        sendTouchDataToSecurityManager(features)
     }
     
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "Touch accessibility service destroyed")
+        // Cleanup overlay receiver and view if present
+        runCatching { hideVerificationOverlay() }
+        overlayReceiver?.let { receiver ->
+            runCatching { unregisterReceiver(receiver) }
+        }
+        overlayReceiver = null
+        windowManager = null
+    }
+
+    private fun showVerificationOverlay() {
+        if (overlayView != null) return
+        val wm = windowManager ?: return
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 24
+            y = 120
+        }
+
+        val container = FrameLayout(this).apply {
+            setBackgroundColor(0xAA000000.toInt())
+            setPadding(24, 16, 24, 16)
+            val tv = TextView(this@TouchAccessibilityService).apply {
+                text = "Verify identity"
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 14f
+            }
+            addView(tv)
+            setOnClickListener {
+                val i = Intent(this@TouchAccessibilityService, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("trigger_biometric", true)
+                }
+                startActivity(i)
+            }
+        }
+
+        overlayView = container
+        wm.addView(container, params)
+    }
+
+    private fun hideVerificationOverlay() {
+        val wm = windowManager
+        val v = overlayView
+        if (wm != null && v != null) {
+            runCatching { wm.removeView(v) }
+        }
+        overlayView = null
+    }
+
+    private fun buildA11yTouchFeatures(dwellMs: Long): DoubleArray {
+        val dwellSec: Double = (dwellMs.coerceAtLeast(1L).toDouble() / 1000.0).coerceIn(0.0, 2.0)
+        val now: Long = System.currentTimeMillis()
+        val x: Double = 0.5
+        val y: Double = 0.5
+        val pSeed: Int = (now % 17).toInt()
+        val sSeed: Int = ((now / 3) % 19).toInt()
+        val pressure: Double = (0.55 + 0.20 * ((pSeed % 11) / 10.0 - 0.5)).coerceIn(0.3, 0.9)
+        val size: Double = (0.65 + 0.20 * ((sSeed % 9) / 8.0 - 0.5)).coerceIn(0.4, 0.95)
+        val velocity: Double = (0.2 + (120.0 / dwellMs.coerceAtLeast(60).toDouble())).coerceIn(0.1, 1.0)
+        val curvature: Double = 0.1
+        val pressureVar: Double = (0.01 + 0.02 * ((pSeed % 7) / 6.0)).coerceIn(0.0, 0.1)
+        val sizeVar: Double = (0.01 + 0.02 * ((sSeed % 5) / 4.0)).coerceIn(0.0, 0.1)
+        val distance: Double = (velocity * dwellSec).coerceIn(0.0, 1.0)
+        return doubleArrayOf(
+            x, y, pressure, size, dwellSec, velocity, curvature, pressureVar, sizeVar, distance
+        )
     }
 }

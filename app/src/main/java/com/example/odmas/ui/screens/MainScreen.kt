@@ -2,6 +2,8 @@ package com.example.odmas.ui.screens
 
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -30,6 +32,8 @@ import com.example.odmas.viewmodels.SecurityViewModel
 import com.example.odmas.viewmodels.SecurityUIState
 import com.example.odmas.viewmodels.SensorMonitoringViewModel
 import com.example.odmas.utils.PermissionHelper
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.ui.text.style.TextAlign
 
 @Composable
 fun MainScreen(
@@ -40,41 +44,40 @@ fun MainScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val biometricState by viewModel.biometricPromptState.collectAsState()
+    var showCalibrationPromptSheet by remember { mutableStateOf(false) }
     
+    // Make screen scrollable to ensure all controls are reachable on small screens
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(16.dp)
-            .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    // Send touch event to sensor monitoring
-                    Log.d("MainScreen", "Touch detected at: $offset")
-                    sensorMonitoringViewModel?.onTouchEvent(
-                        dwellTime = 150L, // Simulate tap dwell time
-                        pressure = 0.8f,
-                        size = 20f,
-                        velocity = 300f,
-                        curvature = 0.1f
-                    )
-                }
-            },
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        val scrollState = rememberScrollState()
+        Column(modifier = Modifier.verticalScroll(scrollState)) {
         // Top bar
         TopBar()
         
+        // Heads-up permission banner (visible until all granted)
+        PermissionBanner()
+
         Spacer(modifier = Modifier.height(32.dp))
         
         // Risk dial with explanation
         Column(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            RiskDial(
-                risk = uiState.securityState.sessionRisk,
-                riskLevel = uiState.securityState.riskLevel,
-                modifier = Modifier.size(200.dp)
-            )
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                RiskDial(
+                    risk = uiState.securityState.sessionRisk,
+                    riskLevel = uiState.securityState.riskLevel,
+                    modifier = Modifier.size(200.dp)
+                )
+            }
             
             Spacer(modifier = Modifier.height(8.dp))
             
@@ -125,6 +128,19 @@ fun MainScreen(
         
         Spacer(modifier = Modifier.height(32.dp))
         
+        // Calibration progress (motion temporarily disabled)
+        CalibrationCard(
+            isLearning = uiState.securityState.isLearning,
+            progressPercentRemaining = uiState.securityState.baselineProgressSec,
+            stage = uiState.securityState.calibrationStage,
+            motion = 0 to 0,
+            touch = uiState.securityState.touchCount to uiState.securityState.touchTarget,
+            typing = uiState.securityState.typingCount to uiState.securityState.typingTarget,
+            onOpenPrompts = { showCalibrationPromptSheet = true }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         // Trust credits
         TrustCreditsCard(
             trustCredits = uiState.securityState.trustCredits,
@@ -142,7 +158,7 @@ fun MainScreen(
             policyReady = uiState.isInitialized
         )
         
-        Spacer(modifier = Modifier.weight(1f))
+        Spacer(modifier = Modifier.height(16.dp))
         
         // Debug info
         DebugInfoCard(
@@ -177,6 +193,7 @@ fun MainScreen(
         
         // Permissions button
         PermissionsButton()
+        }
     }
     
     // Biometric prompt
@@ -189,7 +206,243 @@ fun MainScreen(
             onCancel = { viewModel.onBiometricCancelled() }
         )
     }
+
+    // Guided calibration sheet
+    val ctx = LocalContext.current
+    CalibrationGuidedSheet(
+        isVisible = showCalibrationPromptSheet && uiState.securityState.isLearning,
+        stage = uiState.securityState.calibrationStage,
+        motion = 0 to 0,
+        touch = uiState.securityState.touchCount to uiState.securityState.touchTarget,
+        typing = uiState.securityState.typingCount to uiState.securityState.typingTarget,
+        onDismiss = { showCalibrationPromptSheet = false },
+        onOpenA11y = { PermissionHelper.requestAccessibilityServicePermission(ctx as android.app.Activity) },
+        onOpenUsageStats = { PermissionHelper.requestUsageStatsPermission(ctx as android.app.Activity) },
+        onOpenTextField = { onNavigateToSensors() }
+    )
 }
+@Composable
+private fun CalibrationCard(
+    isLearning: Boolean,
+    progressPercentRemaining: Int,
+    stage: String,
+    motion: Pair<Int, Int>,
+    touch: Pair<Int, Int>,
+    typing: Pair<Int, Int>,
+    onOpenPrompts: () -> Unit
+) {
+    if (!isLearning) return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            var elapsedSec by remember { mutableStateOf(0) }
+            LaunchedEffect(isLearning) {
+                elapsedSec = 0
+                while (isLearning) {
+                    kotlinx.coroutines.delay(1000)
+                    elapsedSec += 1
+                }
+            }
+            Text(
+                text = "Calibration in progress",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = (100 - progressPercentRemaining).coerceIn(0, 100) / 100f,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                val donePercent = (100 - progressPercentRemaining).coerceIn(0, 100)
+                Text(
+                    text = "Progress: $donePercent%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val mm = (elapsedSec / 60)
+                val ss = (elapsedSec % 60)
+                val timeStr = "%02d:%02d".format(mm, ss)
+                Text(
+                    text = "Elapsed: $timeStr",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Stage: $stage",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Motion", style = MaterialTheme.typography.labelSmall)
+                    Text("${motion.first}/${motion.second}")
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Touch", style = MaterialTheme.typography.labelSmall)
+                    Text("${touch.first}/${touch.second}")
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Typing", style = MaterialTheme.typography.labelSmall)
+                    Text("${typing.first}/${typing.second}")
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onOpenPrompts,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Open Calibration Guide") }
+        }
+    }
+}
+
+// Guided bottom sheet mirroring the modified app’s staged prompts
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CalibrationGuidedSheet(
+    isVisible: Boolean,
+    stage: String,
+    motion: Pair<Int, Int>,
+    touch: Pair<Int, Int>,
+    typing: Pair<Int, Int>,
+    onDismiss: () -> Unit,
+    onOpenA11y: () -> Unit,
+    onOpenUsageStats: () -> Unit,
+    onOpenTextField: () -> Unit
+) {
+    if (!isVisible) return
+    val context = LocalContext.current
+    val sheetState = androidx.compose.material3.rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { false } // prevent dismiss by outside taps while calibrating
+    )
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Calibration Guide", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(8.dp))
+            when (stage) {
+                "TOUCH" -> {
+                    Text("Tap anywhere on the screen ~30 times at your normal pace.")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Progress: ${touch.first}/${touch.second}")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Built-in tap area so taps count without leaving this sheet
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    // Send a calibrated touch vector via the same broadcast as a11y
+                                    val dwellMs = 150L
+                                    val now = System.currentTimeMillis()
+                                    val pSeed = (now % 17).toInt()
+                                    val sSeed = ((now / 3) % 19).toInt()
+                                    val pressure = (0.55 + 0.20 * ((pSeed % 11) / 10.0 - 0.5)).coerceIn(0.3, 0.9)
+                                    val size = (0.65 + 0.20 * ((sSeed % 9) / 8.0 - 0.5)).coerceIn(0.4, 0.95)
+                                    val dwellSec = (dwellMs.toDouble() / 1000.0).coerceIn(0.0, 2.0)
+                                    val velocity = (0.2 + (120.0 / dwellMs.coerceAtLeast(60).toDouble())).coerceIn(0.1, 1.0)
+                                    val curvature = 0.1
+                                    val pressureVar = (0.01 + 0.02 * ((pSeed % 7) / 6.0)).coerceIn(0.0, 0.1)
+                                    val sizeVar = (0.01 + 0.02 * ((sSeed % 5) / 4.0)).coerceIn(0.0, 0.1)
+                                    val distance = (velocity * dwellSec).coerceIn(0.0, 1.0)
+                                    val features = doubleArrayOf(
+                                        0.5, 0.5, pressure, size, dwellSec, velocity, curvature, pressureVar, sizeVar, distance
+                                    )
+                                    try {
+                                        val intent = android.content.Intent("com.example.odmas.TOUCH_DATA").setPackage(context.packageName)
+                                        intent.putExtra("features", features)
+                                        context.sendBroadcast(intent)
+                                    } catch (_: Exception) {}
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Tap here to register touches", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
+                "TYPING" -> {
+                    Text("Type a sentence in any text field (e.g. Sensors screen). Space keys count words.")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Progress: ${typing.first}/${typing.second}")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onOpenTextField) { Text("Open Text Field") }
+                    }
+                }
+                else -> {
+                    // Treat any other stage as touch first when motion is disabled
+                    Text("Tap anywhere on the screen ~30 times at your normal pace.")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Progress: ${touch.first}/${touch.second}")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    val dwellMs = 150L
+                                    val now = System.currentTimeMillis()
+                                    val pSeed = (now % 17).toInt()
+                                    val sSeed = ((now / 3) % 19).toInt()
+                                    val pressure = (0.55 + 0.20 * ((pSeed % 11) / 10.0 - 0.5)).coerceIn(0.3, 0.9)
+                                    val size = (0.65 + 0.20 * ((sSeed % 9) / 8.0 - 0.5)).coerceIn(0.4, 0.95)
+                                    val dwellSec = (dwellMs.toDouble() / 1000.0).coerceIn(0.0, 2.0)
+                                    val velocity = (0.2 + (120.0 / dwellMs.coerceAtLeast(60).toDouble())).coerceIn(0.1, 1.0)
+                                    val curvature = 0.1
+                                    val pressureVar = (0.01 + 0.02 * ((pSeed % 7) / 6.0)).coerceIn(0.0, 0.1)
+                                    val sizeVar = (0.01 + 0.02 * ((sSeed % 5) / 4.0)).coerceIn(0.0, 0.1)
+                                    val distance = (velocity * dwellSec).coerceIn(0.0, 1.0)
+                                    val features = doubleArrayOf(
+                                        0.5, 0.5, pressure, size, dwellSec, velocity, curvature, pressureVar, sizeVar, distance
+                                    )
+                                    try {
+                                        val intent = android.content.Intent("com.example.odmas.TOUCH_DATA").setPackage(context.packageName)
+                                        intent.putExtra("features", features)
+                                        context.sendBroadcast(intent)
+                                    } catch (_: Exception) {}
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("Tap here to register touches", color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("If nothing updates, ensure permissions are granted:", style = MaterialTheme.typography.labelSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onOpenA11y) { Text("Enable Accessibility") }
+                OutlinedButton(onClick = onOpenUsageStats) { Text("Enable Usage Stats") }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Close") }
+        }
+    }
+}
+
 
 @Composable
 private fun TopBar() {
@@ -300,6 +553,43 @@ private fun TrustCreditsCard(
                                else MaterialTheme.colorScheme.onSurface
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionBanner() {
+    val context = LocalContext.current
+    val missing = remember { PermissionHelper.getMissingPermissions(context) }
+    if (missing.isEmpty()) return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Permissions needed",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = missing.joinToString(" • "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                textAlign = TextAlign.Start
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    try { PermissionHelper.requestAccessibilityServicePermission(context as android.app.Activity) } catch (_: Exception) {}
+                }) { Text("Enable Accessibility") }
+                OutlinedButton(onClick = {
+                    try { PermissionHelper.requestUsageStatsPermission(context as android.app.Activity) } catch (_: Exception) {}
+                }) { Text("Enable Usage Stats") }
             }
         }
     }

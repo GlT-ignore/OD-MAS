@@ -34,7 +34,8 @@ import java.util.*
 class SensorMonitoringViewModel(application: Application) : AndroidViewModel(application) {
     
     // Use the real motion sensor collector instead of duplicate sensors
-    private val motionSensorCollector = com.example.odmas.core.sensors.MotionSensorCollector(application)
+    // Motion temporarily disabled
+    // private val motionSensorCollector = com.example.odmas.core.sensors.MotionSensorCollector(application)
     
     // Chaquopy Python ML integration
     private val chaquopyManager = ChaquopyBehavioralManager.getInstance(application)
@@ -94,18 +95,7 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
         Log.d(TAG, "Initializing sensors...")
         
         // Start the real motion sensor collector
-        val sensorStarted = motionSensorCollector.startMonitoring()
-        Log.d(TAG, "Motion sensor collector started: $sensorStarted")
-        
-        // Observe real motion data
-        viewModelScope.launch {
-            motionSensorCollector.motionFeatures.collect { motionFeatures ->
-                motionFeatures?.let { features ->
-                    Log.d(TAG, "Received real motion data: ${features}")
-                    updateMotionDataFromReal(features)
-                }
-            }
-        }
+        // Motion collector disabled
         
         Log.d(TAG, "Sensors initialized successfully")
     }
@@ -231,6 +221,30 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
             touchX = pressure, // Use pressure as touch X indicator
             touchY = size // Use size as touch Y indicator
         )
+
+        // Also forward to the calibration pipeline using the same broadcast action as accessibility
+        // so touches in this screen count towards calibration.
+        try {
+            val dwellSec = (dwellTime.coerceAtLeast(1L).toDouble() / 1000.0).coerceIn(0.0, 2.0)
+            val rhythmVar = 0.02 // small stable variance proxy
+            val distance = (velocity * dwellSec).toDouble().coerceIn(0.0, 1.0)
+            val features = doubleArrayOf(
+                0.5,                 // x (placeholder)
+                0.5,                 // y (placeholder)
+                pressure.toDouble(), // pressure
+                size.toDouble(),     // size
+                dwellSec,            // dwellSec
+                velocity.toDouble(), // velocity
+                curvature.toDouble(),// curvature
+                0.02,                // pressureVar (proxy)
+                rhythmVar,           // sizeVar / rhythm proxy
+                distance             // distance
+            )
+            val ctx = getApplication<Application>().applicationContext
+            val intent = android.content.Intent("com.example.odmas.TOUCH_DATA").setPackage(ctx.packageName)
+            intent.putExtra("features", features)
+            ctx.sendBroadcast(intent)
+        } catch (_: Exception) {}
     }
     
     /**
@@ -382,7 +396,7 @@ class SensorMonitoringViewModel(application: Application) : AndroidViewModel(app
     
     override fun onCleared() {
         super.onCleared()
-        motionSensorCollector.stopMonitoring()
+        // motionSensorCollector.stopMonitoring()
         runCatching { getApplication<Application>().unregisterReceiver(touchReceiver) }
         runCatching { getApplication<Application>().unregisterReceiver(typingReceiver) }
         Log.d(TAG, "Sensor monitoring stopped")

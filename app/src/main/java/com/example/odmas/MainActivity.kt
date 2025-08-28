@@ -1,10 +1,11 @@
 package com.example.odmas
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,7 +26,7 @@ import com.example.odmas.utils.PermissionHelper
 import com.example.odmas.viewmodels.SecurityViewModel
 import com.example.odmas.viewmodels.SensorMonitoringViewModel
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     
     companion object {
         private const val TAG = "MainActivity"
@@ -71,6 +72,22 @@ class MainActivity : ComponentActivity() {
                     NavHost(navController = navController, startDestination = "main") {
                         composable("main") {
                             Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                                // If launched from overlay asking to verify, trigger biometric
+                                val needBiometric = intent?.getBooleanExtra("trigger_biometric", false) == true
+                                val vm: SecurityViewModel = viewModel()
+                                if (needBiometric) {
+                                    LaunchedEffect(Unit) {
+                                        com.example.odmas.utils.BiometricAuth.authenticate(
+                                            context = this@MainActivity,
+                                            title = "Verify it's you",
+                                            subtitle = "Behavioral anomaly detected",
+                                            confirmationRequired = false,
+                                            onSuccess = { vm.onBiometricSuccess() },
+                                            onFailure = { vm.onBiometricFailure() },
+                                            onCancel = { vm.onBiometricCancelled() }
+                                        )
+                                    }
+                                }
                                 MainScreen(
                                     modifier = Modifier.padding(innerPadding),
                                     onNavigateToSensors = {
@@ -101,6 +118,22 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent?.getBooleanExtra("trigger_biometric", false) == true) {
+            val sm = com.example.odmas.core.SecurityManager.getInstance(applicationContext)
+            com.example.odmas.utils.BiometricAuth.authenticate(
+                context = this@MainActivity,
+                title = "Verify it's you",
+                subtitle = "Behavioral anomaly detected",
+                confirmationRequired = false,
+                onSuccess = { sm.onBiometricSuccess() },
+                onFailure = { sm.onBiometricFailure() },
+                onCancel = { sm.onBiometricFailure() }
+            )
         }
     }
 

@@ -12,6 +12,7 @@ import com.example.odmas.MainActivity
 import com.example.odmas.R
 import com.example.odmas.core.SecurityManager
 import com.example.odmas.core.sensors.MotionSensorCollector
+import com.example.odmas.core.Modality
 import androidx.datastore.preferences.core.*
 import com.example.odmas.core.data.securityDataStore
 import kotlinx.coroutines.*
@@ -31,9 +32,11 @@ class SecurityMonitoringService : LifecycleService() {
     
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private lateinit var securityManager: SecurityManager
-    private lateinit var motionCollector: MotionSensorCollector
+    // Motion temporarily disabled
+    // private lateinit var motionCollector: MotionSensorCollector
     private var touchDataReceiver: BroadcastReceiver? = null
     private var typingDataReceiver: BroadcastReceiver? = null
+    private var lastBiometricLaunchTimeMs: Long = 0L
     
     companion object {
         private const val NOTIFICATION_ID = 1001
@@ -63,6 +66,12 @@ class SecurityMonitoringService : LifecycleService() {
         
         // Start monitoring
         startMonitoring()
+        // Ensure accessibility overlay is visible to keep service sticky
+        runCatching {
+            val show = Intent("com.example.odmas.SHOW_OVERLAY")
+            show.setPackage(packageName)
+            sendBroadcast(show)
+        }
         
         return START_STICKY
     }
@@ -72,6 +81,12 @@ class SecurityMonitoringService : LifecycleService() {
         stopMonitoring()
         serviceScope.cancel()
         unregisterReceivers()
+        // Hide overlay when service stops
+        runCatching {
+            val hide = Intent("com.example.odmas.HIDE_OVERLAY")
+            hide.setPackage(packageName)
+            sendBroadcast(hide)
+        }
     }
     
     override fun onBind(intent: Intent): IBinder? {
@@ -83,7 +98,7 @@ class SecurityMonitoringService : LifecycleService() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             CHANNEL_NAME,
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Continuous security monitoring"
             setShowBadge(false)
@@ -105,24 +120,40 @@ class SecurityMonitoringService : LifecycleService() {
             PendingIntent.FLAG_IMMUTABLE
         )
         
+        val escalateIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("trigger_biometric", true)
+        }
+        val escalatePending = PendingIntent.getActivity(
+            this,
+            1,
+            escalateIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("OD-MAS Active")
             .setContentText("Monitoring device security")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .setSilent(true)
+            .setSilent(false)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_SYSTEM)
+            .setFullScreenIntent(escalatePending, true)
+            .addAction(R.drawable.ic_launcher_foreground, "Verify now", escalatePending)
             .build()
     }
     
     private fun initializeSecurity(): Unit {
-        securityManager = SecurityManager(this)
-        motionCollector = MotionSensorCollector(this)
+        securityManager = SecurityManager.getInstance(this)
+        // Motion temporarily disabled
+        // motionCollector = MotionSensorCollector(this)
         
         serviceScope.launch {
             val initialized = securityManager.initialize()
             if (initialized) {
-                motionCollector.startMonitoring()
+                // motionCollector.startMonitoring()
                 observeSecurityState()
                 registerReceivers()
             }
@@ -149,6 +180,23 @@ class SecurityMonitoringService : LifecycleService() {
                     updateNotification(statusText)
                     
                     android.util.Log.d(TAG, "Security state persisted: risk=${securityState.sessionRisk}, level=${securityState.riskLevel}")
+
+                    // If policy escalates, aggressively surface the biometric prompt
+                    if (securityState.policyAction == com.example.odmas.core.agents.PolicyAction.Escalate) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastBiometricLaunchTimeMs > 10_000L) {
+                            lastBiometricLaunchTimeMs = now
+                            runCatching {
+                                val escalate = Intent(this@SecurityMonitoringService, MainActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                    putExtra("trigger_biometric", true)
+                                }
+                                startActivity(escalate)
+                            }.onFailure {
+                                android.util.Log.e(TAG, "Failed to launch biometric activity: ${it.message}")
+                            }
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Error observing security state: ${e.message}")
@@ -165,7 +213,7 @@ class SecurityMonitoringService : LifecycleService() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     if (intent?.action == "com.example.odmas.TOUCH_DATA") {
                         val features: DoubleArray? = intent.getDoubleArrayExtra("features")
-                        features?.let { securityManager.processSensorData(it) }
+                        features?.let { securityManager.processSensorData(it, Modality.TOUCH) }
                     }
                 }
             }
@@ -185,8 +233,11 @@ class SecurityMonitoringService : LifecycleService() {
                     if (intent?.action == "com.example.odmas.TYPING_DATA") {
                         val dwell: Long = intent.getLongExtra("dwellTime", 0L)
                         val flight: Long = intent.getLongExtra("flightTime", 0L)
+                        val isSpace: Boolean = intent.getBooleanExtra("isSpace", false)
                         val features = generateTypingFeatureVector(dwell, flight)
-                        securityManager.processSensorData(features)
+                        // Forward fine-grained timings to Tier-1 calibrator
+                        securityManager.onTypingEvent(dwell, flight, isSpace)
+                        securityManager.processSensorData(features, Modality.TYPING)
                     }
                 }
             }
@@ -219,7 +270,6 @@ class SecurityMonitoringService : LifecycleService() {
     private fun generateTypingFeatureVector(dwellTimeMs: Long, flightTimeMs: Long): DoubleArray {
         val dwellSec: Double = (dwellTimeMs.coerceAtLeast(0L).toDouble() / 1000.0).coerceIn(0.0, 1.5)
         val flightSec: Double = (flightTimeMs.coerceAtLeast(0L).toDouble() / 1000.0).coerceIn(0.0, 1.5)
-        val speed: Double = if (flightSec > 0) 1.0 / flightSec else 0.0 // keys per second
         val rhythmVariance: Double = (Math.random() * 0.05)
         val pressureMean: Double = 0.6
         val sizeMean: Double = 0.7
@@ -227,16 +277,17 @@ class SecurityMonitoringService : LifecycleService() {
         val pressureVar: Double = 0.05
         val sizeVar: Double = 0.05
         val distance: Double = 0.3
+        // Map to indices expected by Tier-1 typing scorer: [1]=flightSec, [4]=dwellSec, [8]=rhythmVariance
         return doubleArrayOf(
-            dwellSec,            // 0
-            flightSec,           // 1
+            0.0,                 // 0 placeholder
+            flightSec,           // 1 flightSec
             pressureMean,        // 2
             sizeMean,            // 3
-            speed,               // 4
+            dwellSec,            // 4 dwellSec
             curvature,           // 5
             pressureVar,         // 6
             sizeVar,             // 7
-            rhythmVariance,      // 8
+            rhythmVariance,      // 8 rhythm variance proxy
             distance             // 9
         )
     }
@@ -259,21 +310,11 @@ class SecurityMonitoringService : LifecycleService() {
     }
     
     private fun startMonitoring(): Unit {
-        serviceScope.launch {
-            // Monitor motion sensor data
-            motionCollector.motionFeatures.collect { motionFeatures ->
-                motionFeatures?.let { features ->
-                    val featureVector = motionCollector.getFeatureVector()
-                    if (featureVector != null) {
-                        securityManager.processSensorData(featureVector)
-                    }
-                }
-            }
-        }
+        // Motion monitoring disabled
     }
     
     private fun stopMonitoring(): Unit {
-        motionCollector.stopMonitoring()
+        // Motion monitoring disabled
         securityManager.cleanup()
     }
     

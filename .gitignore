@@ -9,6 +9,9 @@ local.properties
 /.cxx/
 app/build/
 
+# Reference app (do not commit)
+OD-MAS-modifications/
+
 # Keystores (never commit secrets)
 *.jks
 *.keystore

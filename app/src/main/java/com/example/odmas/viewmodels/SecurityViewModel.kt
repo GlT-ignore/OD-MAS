@@ -12,6 +12,7 @@ import com.example.odmas.core.agents.PolicyAction
 import com.example.odmas.core.sensors.MotionSensorCollector
 import com.example.odmas.core.sensors.TouchSensorCollector
 import com.example.odmas.core.services.SecurityMonitoringService
+import com.example.odmas.core.Modality
 import androidx.datastore.preferences.core.*
 import com.example.odmas.core.data.securityDataStore
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,15 +28,26 @@ import kotlinx.coroutines.launch
  */
 class SecurityViewModel(application: Application) : AndroidViewModel(application) {
     
-    private val securityManager = SecurityManager(application)
+    // Expose for calibration helpers
+    internal val securityManager = SecurityManager.getInstance(application)
     private val touchCollector = TouchSensorCollector()
-    private val motionCollector = MotionSensorCollector(application)
+    // Motion temporarily disabled
+    // private val motionCollector = MotionSensorCollector(application)
     
     private val _uiState = MutableStateFlow(SecurityUIState())
     val uiState: StateFlow<SecurityUIState> = _uiState.asStateFlow()
     
     private val _biometricPromptState = MutableStateFlow<BiometricPromptState?>(null)
     val biometricPromptState: StateFlow<BiometricPromptState?> = _biometricPromptState.asStateFlow()
+    // Fallback receiver so TOUCH_DATA advances calibration even if service is not active
+    private val touchDataReceiver: android.content.BroadcastReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action == "com.example.odmas.TOUCH_DATA") {
+                val features: DoubleArray? = intent.getDoubleArrayExtra("features")
+                features?.let { securityManager.processSensorData(it, com.example.odmas.core.Modality.TOUCH) }
+            }
+        }
+    }
     
     // Debug logging
     companion object {
@@ -54,6 +66,21 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
         observeSecurityState()
         restorePersistedState()
         startBackgroundService()
+        // Register fallback receiver (app process scope)
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                getApplication<Application>().registerReceiver(
+                    touchDataReceiver,
+                    android.content.IntentFilter("com.example.odmas.TOUCH_DATA"),
+                    android.content.Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                getApplication<Application>().registerReceiver(
+                    touchDataReceiver,
+                    android.content.IntentFilter("com.example.odmas.TOUCH_DATA")
+                )
+            }
+        }
     }
     
     private fun initializeSecurity(): Unit {
@@ -62,8 +89,8 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
             val initialized = securityManager.initialize()
             Log.d(TAG, "Security manager initialization: $initialized")
             if (initialized) {
-                val motionStarted = motionCollector.startMonitoring()
-                Log.d(TAG, "Motion sensor monitoring started: $motionStarted")
+                // val motionStarted = motionCollector.startMonitoring()
+                // Log.d(TAG, "Motion sensor monitoring started: $motionStarted")
                 updateUIState(isInitialized = true)
                 Log.d(TAG, "Security system initialized successfully")
             } else {
@@ -107,7 +134,8 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
         val touchFeatures = touchCollector.getFeatureVector()
         if (touchFeatures != null) {
             Log.d(TAG, "Touch features extracted: ${touchFeatures.contentToString()}")
-            securityManager.processSensorData(touchFeatures)
+            // Pass explicit modality for calibration pipelines
+            securityManager.processSensorData(touchFeatures, Modality.TOUCH)
             touchCollector.clearFeatures()
         }
     }
@@ -172,15 +200,13 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
             Log.d(TAG, "Starting sensor data simulation")
             // Simulate some sensor data to trigger risk changes
             val simulatedTouchFeatures = doubleArrayOf(0.5, 0.3, 0.8, 0.2, 0.6, 0.4, 0.7, 0.1, 0.9, 0.5)
-            val simulatedMotionFeatures = doubleArrayOf(0.8, 0.6, 0.4, 0.7, 0.3, 0.9, 0.2, 0.5, 0.8, 0.1)
             
             Log.d(TAG, "Sending simulated touch features: ${simulatedTouchFeatures.contentToString()}")
-            securityManager.processSensorData(simulatedTouchFeatures)
+            securityManager.processSensorData(simulatedTouchFeatures, Modality.TOUCH)
             
             kotlinx.coroutines.delay(1000) // Wait 1 second
             
-            Log.d(TAG, "Sending simulated motion features: ${simulatedMotionFeatures.contentToString()}")
-            securityManager.processSensorData(simulatedMotionFeatures)
+            // Motion disabled
         }
     }
     
@@ -282,10 +308,16 @@ class SecurityViewModel(application: Application) : AndroidViewModel(application
     
     override fun onCleared(): Unit {
         super.onCleared()
-        motionCollector.stopMonitoring()
+        // motionCollector.stopMonitoring()
         securityManager.cleanup()
         stopBackgroundService()
+        runCatching { getApplication<Application>().unregisterReceiver(touchDataReceiver) }
     }
+}
+
+// ---- Calibration helper (non-simulated) ----
+fun SecurityViewModel.submitCalibrationSample(features: DoubleArray, modality: Modality) {
+    securityManager.processSensorData(features, modality)
 }
 
 /**

@@ -11,173 +11,170 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.odmas.utils.LogFileLogger
+import kotlinx.coroutines.CoroutineExceptionHandler
 
-/**
- * Security Manager: Orchestrates all agents for behavioral anomaly detection
- * 
- * Responsibilities:
- * - Coordinate Tier-0 and Tier-1 agents
- * - Manage fusion and policy decisions
- * - Handle biometric verification
- * - Maintain session state
- */
 class SecurityManager(private val context: Context) {
-    
-    // Agents
     private val tier0Agent = Tier0StatsAgent()
-    private val tier1Agent = Tier1AutoencoderAgent(context)
+    private val tier1Agent = Tier1BehaviorAgent(context)
     private val fusionAgent = FusionAgent()
     private val policyAgent = PolicyAgent()
-    
-    // Chaquopy Python ML Integration
     private val chaquopyManager = ChaquopyBehavioralManager.getInstance(context)
-    
-    // State management
     private val _securityState = MutableStateFlow(SecurityState())
     val securityState: StateFlow<SecurityState> = _securityState.asStateFlow()
-    
-    private val coroutineScope = CoroutineScope(Dispatchers.Default)
-    private var isInitialized = false
-    
-    companion object {
-        private const val PROCESSING_INTERVAL_MS = 3000L // 3-second windows
-        private const val TAG = "SecurityManager"
+    private val job = kotlinx.coroutines.SupervisorJob()
+    private val crashHandler = CoroutineExceptionHandler { _, t ->
+        LogFileLogger.log(TAG, "Coroutine error: ${t.message}", t)
     }
-    
-    /**
-     * Initialize the security manager
-     */
+    private val coroutineScope = CoroutineScope(Dispatchers.Default + job + crashHandler)
+    private var isInitialized = false
+    private var lastFeatures: DoubleArray? = null
+    private var lastModality: Modality? = null
+    private var stateTickerJob: kotlinx.coroutines.Job? = null
+
+    companion object {
+        private const val PROCESSING_INTERVAL_MS = 3000L
+        private const val TAG = "SecurityManager"
+        @Volatile private var instance: SecurityManager? = null
+        fun getInstance(context: Context): SecurityManager {
+            val appCtx = context.applicationContext
+            val current = instance
+            if (current != null) return current
+            return synchronized(this) {
+                instance ?: SecurityManager(appCtx).also { instance = it }
+            }
+        }
+    }
+
     suspend fun initialize(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Starting security manager initialization...")
-                
-                // Initialize Chaquopy Python ML
+                LogFileLogger.init(context)
+                LogFileLogger.log(TAG, "Initialization started")
                 val chaquopyInitialized = chaquopyManager.initialize()
                 Log.d(TAG, "Chaquopy Python ML initialization: $chaquopyInitialized")
-                
-                // Initialize Tier-1 autoencoder (make it optional for now)
                 val tier1Initialized = tier1Agent.initializeModel()
                 Log.d(TAG, "Tier-1 agent initialization: $tier1Initialized")
-                // Don't fail if Tier-1 fails - we can still work with Tier-0
-                
-                // Initialize fusion agent
                 fusionAgent.initializeSession()
                 Log.d(TAG, "Fusion agent initialized")
-                
-                // Reset policy agent
                 policyAgent.reset()
                 Log.d(TAG, "Policy agent reset")
-                
-                // Start Chaquopy monitoring
                 if (chaquopyInitialized) {
                     chaquopyManager.startMonitoring()
                     Log.d(TAG, "Chaquopy monitoring started")
                 }
-                
                 isInitialized = true
                 updateSecurityState()
                 Log.d(TAG, "Security manager initialization completed successfully")
+                // Periodic ticker to refresh calibration progress/risk UI
+                stateTickerJob?.cancel()
+                stateTickerJob = coroutineScope.launch {
+                    while (isInitialized) {
+                        runCatching { updateSecurityState() }
+                        kotlinx.coroutines.delay(1000L)
+                    }
+                }
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "Error during initialization: ${e.message}", e)
-                // Still initialize even if there are errors
                 isInitialized = true
                 updateSecurityState()
                 Log.d(TAG, "Security manager initialized with fallback mode")
+                stateTickerJob?.cancel()
+                stateTickerJob = coroutineScope.launch {
+                    while (isInitialized) {
+                        runCatching { updateSecurityState() }
+                        kotlinx.coroutines.delay(1000L)
+                    }
+                }
                 true
             }
         }
     }
-    
-    /**
-     * Process new sensor data
-     * @param features Feature vector from sensors
-     */
-    fun processSensorData(features: DoubleArray): Unit {
+
+    fun processSensorData(features: DoubleArray): Unit = processSensorData(features, Modality.UNKNOWN)
+
+    fun processSensorData(features: DoubleArray, modality: Modality): Unit {
         if (!isInitialized) {
             Log.w(TAG, "Security manager not initialized, ignoring sensor data")
             return
         }
-        
-        Log.d(TAG, "Processing sensor data: ${features.contentToString()}")
-        
+        Log.d(TAG, "Processing sensor data: ${features.contentToString()} (modality=$modality)")
         coroutineScope.launch {
-            // Process with Chaquopy Python ML
-            val chaquopyResult = chaquopyManager.analyzeBehavior(features)
-            Log.d(TAG, "Chaquopy analysis: Risk=${chaquopyResult.riskScore}%, Confidence=${chaquopyResult.confidence}%")
-            
-            // Add features to Tier-0 agent
-            tier0Agent.addFeatures(features)
-            
-            // Process Tier-0 risk
-            val mahalanobisDistance = tier0Agent.computeMahalanobisDistance()
-            if (mahalanobisDistance != null) {
-                Log.d(TAG, "Tier-0 Mahalanobis distance: $mahalanobisDistance")
-                val tier0Risk = fusionAgent.processTier0Risk(mahalanobisDistance)
-                Log.d(TAG, "Tier-0 risk: $tier0Risk")
-                
-                // Check if Tier-1 should run
-                var tier1Risk: Double? = null
-                if (fusionAgent.shouldRunTier1(tier0Risk)) {
-                    Log.d(TAG, "Running Tier-1 agent")
-                    val windowFeatures = tier0Agent.getCurrentWindowFeatures()
-                    if (windowFeatures != null) {
-                        val reconstructionError = tier1Agent.computeReconstructionError(windowFeatures)
-                        if (reconstructionError != null) {
-                            tier1Risk = fusionAgent.processTier1Risk(reconstructionError)
-                            Log.d(TAG, "Tier-1 risk: $tier1Risk")
-                            fusionAgent.markTier1Run()
-                        }
+            try {
+                val learningDone = tier1Agent.isCalibrated()
+                if (!learningDone) {
+                    tier0Agent.addFeatures(features, modality)
+                    tier1Agent.submitCalibrationSample(features, modality)
+                    tier1Agent.trainAllIfNeeded()
+                    lastFeatures = features
+                    lastModality = modality
+                    updateSecurityState(0.0, PolicyAction.Monitor)
+                    return@launch
+                }
+                val chaquopyResult = chaquopyManager.analyzeBehavior(features)
+                Log.d(TAG, "Chaquopy analysis: Risk=${chaquopyResult.riskScore}%, Confidence=${chaquopyResult.confidence}%")
+                LogFileLogger.log(TAG, "Chaquopy risk=${chaquopyResult.riskScore}, conf=${chaquopyResult.confidence}")
+                tier0Agent.addFeatures(features, modality)
+                lastFeatures = features
+                lastModality = modality
+                val mahalanobisDistance = tier0Agent.computeMahalanobisDistance()
+                if (mahalanobisDistance != null) {
+                    Log.d(TAG, "Tier-0 Mahalanobis distance: $mahalanobisDistance")
+                    val tier0Risk = fusionAgent.processTier0Risk(mahalanobisDistance)
+                    Log.d(TAG, "Tier-0 risk: $tier0Risk")
+                    var tier1Risk: Double? = null
+                    if (fusionAgent.shouldRunTier1(tier0Risk)) {
+                        val touchW = tier0Agent.getWindowFeaturesFor(Modality.TOUCH)
+                        val typingW = tier0Agent.getWindowFeaturesFor(Modality.TYPING)
+                        var touchScore: Double? = null
+                        var typingScore: Double? = null
+                        try { if (touchW != null) touchScore = tier1Agent.computeTier1Probability(touchW, Modality.TOUCH) } catch (_: Throwable) {}
+                        try { if (typingW != null) typingScore = tier1Agent.computeTier1Probability(typingW, Modality.TYPING) } catch (_: Throwable) {}
+                        val continuousTouching = (lastModality == Modality.TOUCH)
+                        val weighted = mutableListOf<Pair<Double, Double>>()
+                        touchScore?.let { s -> weighted.add(s to if (continuousTouching) 0.6 else 0.4) }
+                        typingScore?.let { s -> weighted.add(s to 0.6) }
+                        val sumW = weighted.sumOf { it.second }
+                        tier1Risk = if (sumW > 0.0) weighted.sumOf { it.first * it.second } / sumW else null
+                        Log.d(TAG, "Tier-1 scores: touch=${touchScore ?: -1.0}, typing=${typingScore ?: -1.0}, fused=${tier1Risk ?: -1.0}")
+                        if (tier1Risk != null) fusionAgent.markTier1Run()
                     }
-                }
-                
-                // Fuse risks (prioritize Chaquopy if available)
-                val sessionRisk = if (chaquopyResult.confidence > 80f) {
-                    // Use Chaquopy as primary, others as backup
-                    (chaquopyResult.riskScore * 0.7 + (tier0Risk * 0.3)).toDouble()
+                    val fusedRisk = fusionAgent.fuseRisks(tier0Risk, tier1Risk)
+                    val sessionRisk = if (chaquopyResult.confidence > 80f) {
+                        0.5 * fusedRisk + 0.5 * chaquopyResult.riskScore.toDouble()
+                    } else {
+                        fusedRisk
+                    }
+                    Log.d(TAG, "Fused session risk (final): $sessionRisk")
+                    LogFileLogger.log(TAG, "Fused session risk: $sessionRisk, tier0Ready=${tier0Agent.isBaselineReady()}, tier1Ready=${tier1Agent.isAnyModalityReady()}")
+                    val policyAction = policyAgent.processSessionRisk(sessionRisk)
+                    updateSecurityState(sessionRisk, policyAction)
+                    if (policyAction == PolicyAction.Escalate) handleEscalation()
                 } else {
-                    fusionAgent.fuseRisks(tier0Risk, tier1Risk)
+                    val sessionRisk = chaquopyResult.riskScore.toDouble()
+                    val policyAction = policyAgent.processSessionRisk(sessionRisk)
+                    updateSecurityState(sessionRisk, policyAction)
+                    if (policyAction == PolicyAction.Escalate) handleEscalation()
                 }
-                Log.d(TAG, "Fused session risk (with Chaquopy): $sessionRisk")
-                
-                // Process policy
-                val policyAction = policyAgent.processSessionRisk(sessionRisk)
-                Log.d(TAG, "Policy action: $policyAction")
-                
-                // Update state
-                updateSecurityState(sessionRisk, policyAction)
-                
-                // Handle escalation
-                if (policyAction == PolicyAction.Escalate) {
-                    Log.d(TAG, "Handling escalation")
-                    handleEscalation()
-                }
-            } else {
-                Log.d(TAG, "Tier-0 baseline not ready yet")
+            } catch (t: Throwable) {
+                Log.e(TAG, "processSensorData error: ${t.message}", t)
+                LogFileLogger.log(TAG, "processSensorData error: ${t.message}", t)
             }
         }
     }
-    
-    /**
-     * Handle biometric verification success
-     */
+
     fun onBiometricSuccess(): Unit {
         policyAgent.onBiometricSuccess()
         updateSecurityState()
     }
-    
-    /**
-     * Handle biometric verification failure
-     */
+
     fun onBiometricFailure(): Unit {
         policyAgent.onBiometricFailure()
         updateSecurityState()
     }
-    
-    /**
-     * Reset security state (for new session or user)
-     */
+
     fun reset(): Unit {
         tier0Agent.resetBaseline()
         tier1Agent.resetBaseline()
@@ -185,25 +182,18 @@ class SecurityManager(private val context: Context) {
         policyAgent.reset()
         updateSecurityState()
     }
-    
-    /**
-     * Seed baselines quickly for demo mode so agents show ready immediately
-     */
+
     fun seedDemoBaseline(): Unit {
-        // Generate synthetic feature vectors within typical range
-        repeat(60) {
+        repeat(120) {
             val features = DoubleArray(10) { Math.random() * 0.5 + 0.25 }
-            tier0Agent.addFeatures(features)
+            val modality = if (it % 2 == 0) Modality.TOUCH else Modality.TYPING
+            tier0Agent.addFeatures(features, modality)
+            tier1Agent.addBaselineSample(features, modality)
         }
-        // Seed Tier-1 baseline with plausible mean/std
-        tier1Agent.setBaselineStats(mean = 0.15, std = 0.05)
-        // Update state to reflect readiness
+        tier1Agent.trainAllIfNeeded()
         updateSecurityState()
     }
-    
-    /**
-     * Get current security status
-     */
+
     fun getCurrentStatus(): SecurityStatus {
         val state = _securityState.value
         return SecurityStatus(
@@ -213,23 +203,42 @@ class SecurityManager(private val context: Context) {
             isEscalated = state.isEscalated,
             trustCredits = state.trustCredits,
             tier0Ready = tier0Agent.isBaselineReady(),
-            tier1Ready = tier1Agent.isBaselineReady()
+            tier1Ready = tier1Agent.isAnyModalityReady()
         )
     }
-    
-    /**
-     * Clean up resources
-     */
+
     fun cleanup(): Unit {
         tier1Agent.close()
+        runCatching { stateTickerJob?.cancel() }
+        job.cancel()
     }
-    
+
+    /**
+     * Receive fine-grained typing timing from UI to help calibration when a11y is not available.
+     */
+    fun onTypingEvent(dwellMs: Long, flightMs: Long, isSpace: Boolean) {
+        tier1Agent.submitTypingTiming(dwellMs, flightMs, isSpace)
+    }
+
     private fun updateSecurityState(
         sessionRisk: Double = _securityState.value.sessionRisk,
         policyAction: PolicyAction = PolicyAction.Monitor
     ): Unit {
         val policyState = policyAgent.getCurrentState()
-        
+
+        val tier0Ready = tier0Agent.isBaselineReady()
+        val learningDone = tier1Agent.isCalibrated()
+        val isLearning = !learningDone
+        val remainingPercent = if (learningDone) 0 else (100 - tier1Agent.getCalibrationProgressPercent()).coerceIn(0, 100)
+
+        val (touchCount, touchTarget) = tier1Agent.getTouchProgress()
+        val (typingCount, typingTarget) = tier1Agent.getTypingProgress()
+        val calStage = tier1Agent.getCurrentCalibrationStage().name
+
+        val touchStats = tier0Agent.getWindowStatsFor(Modality.TOUCH)
+        val typingStats = tier0Agent.getWindowStatsFor(Modality.TYPING)
+        val boundsStr = formatBoundsAll(touchStats, typingStats)
+
         _securityState.value = SecurityState(
             sessionRisk = sessionRisk,
             riskLevel = policyState.riskLevel,
@@ -238,21 +247,48 @@ class SecurityManager(private val context: Context) {
             consecutiveHighRisk = policyState.consecutiveHighRisk,
             consecutiveLowRisk = policyState.consecutiveLowRisk,
             policyAction = policyAction,
-            tier0Ready = tier0Agent.isBaselineReady(),
-            tier1Ready = tier1Agent.isBaselineReady()
+            tier0Ready = tier0Ready,
+            tier1Ready = tier1Agent.isAnyModalityReady(),
+            isLearning = isLearning,
+            baselineProgressSec = remainingPercent,
+            baselineBounds = boundsStr,
+            calibrationStage = calStage,
+            touchCount = touchCount,
+            touchTarget = touchTarget,
+            typingCount = typingCount,
+            typingTarget = typingTarget
         )
     }
-    
+
     private fun handleEscalation(): Unit {
-        // This will trigger the UI to show biometric prompt
-        // The actual biometric handling is done in the UI layer
         updateSecurityState()
+    }
+
+    private fun formatBoundsAll(
+        touch: Pair<DoubleArray, DoubleArray>?,
+        typing: Pair<DoubleArray, DoubleArray>?
+    ): String {
+        val tokens = ArrayList<String>(30)
+        fun appendPair(pair: Pair<DoubleArray, DoubleArray>?) {
+            if (pair == null) {
+                repeat(10) { tokens.add("0.000|0.000") }
+            } else {
+                val (mean, std) = pair
+                val n = kotlin.math.min(10, kotlin.math.min(mean.size, std.size))
+                for (i in 0 until n) {
+                    val mStr = java.lang.String.format(java.util.Locale.US, "%.3f", mean[i])
+                    val sStr = java.lang.String.format(java.util.Locale.US, "%.3f", std[i].coerceAtLeast(1e-9))
+                    tokens.add("$mStr|$sStr")
+                }
+                if (n < 10) repeat(10 - n) { tokens.add("0.000|0.000") }
+            }
+        }
+        appendPair(touch)
+        appendPair(typing)
+        return tokens.joinToString(",")
     }
 }
 
-/**
- * Security state data class
- */
 data class SecurityState(
     val sessionRisk: Double = 0.0,
     val riskLevel: RiskLevel = RiskLevel.LOW,
@@ -262,12 +298,21 @@ data class SecurityState(
     val consecutiveLowRisk: Int = 0,
     val policyAction: PolicyAction = PolicyAction.Monitor,
     val tier0Ready: Boolean = false,
-    val tier1Ready: Boolean = false
+    val tier1Ready: Boolean = false,
+    // Learning / calibration UI support
+    val isLearning: Boolean = true,
+    // Remaining percent (0..100)
+    val baselineProgressSec: Int = 100,
+    // CSV of mean|std tokens for 30 entries (10 per modality)
+    val baselineBounds: String = "",
+    // Calibration staged guidance
+    val calibrationStage: String = "TOUCH",
+    val touchCount: Int = 0,
+    val touchTarget: Int = 30,
+    val typingCount: Int = 0,
+    val typingTarget: Int = 100
 )
 
-/**
- * Security status for external components
- */
 data class SecurityStatus(
     val isMonitoring: Boolean,
     val sessionRisk: Double,
